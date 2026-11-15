@@ -275,19 +275,21 @@ static bool reopen(void) {
 }
 
 // puts the decoder on the first track from index on that opens, ms into it
-// wrap goes on from the last track to the first, false when no track is left or none opens
-static bool load(uint32_t index, uint32_t ms, bool wrap) {
+// a repeating queue goes on from its last track to its first, false when no track is left or none opens
+static bool load(uint32_t index, uint32_t ms) {
 	const struct track* t = nullptr;
-	uint32_t tries;
+	enum play_repeat repeat;
+	uint32_t failed = 0;
 	int r;
 
-	for(tries = 0;; tries++, index++, ms = 0, t = nullptr) {
+	for(;; index++, ms = 0, t = nullptr) {
 		pthread_mutex_lock(&p.lock);
-		if(wrap && index >= p.count) {
+		repeat = p.repeat;
+		if(repeat == REPEAT_QUEUE && index >= p.count) {
 			index = 0;
 		}
 
-		if(index < p.count && tries < p.count) {
+		if(index < p.count && failed < p.count) {
 			t = p.queue[index].track;
 			p.id = p.queue[index].id;
 		}
@@ -303,6 +305,7 @@ static bool load(uint32_t index, uint32_t ms, bool wrap) {
 		if(!p.open || p.dec.path != t->path) {
 			close_decoder();
 			if(!dec_open(&p.dec, t->path)) {
+				failed++;
 				continue;
 			}
 
@@ -315,6 +318,11 @@ static bool load(uint32_t index, uint32_t ms, bool wrap) {
 		// a file that cannot seek plays on from where it is
 		r = dec_seek(&p.dec, (int64_t)ms * p.dec.format.rate / 1000);
 		if(r) {
+			return true;
+		}
+
+		// ms is at or past the end, so the track has ended, one that repeats starts over
+		if(repeat == REPEAT_TRACK && dec_seek(&p.dec, 0) > 0) {
 			return true;
 		}
 
@@ -359,7 +367,7 @@ static void begin(uint32_t seq, uint32_t index, uint32_t ms, bool resume, bool h
 		pthread_mutex_unlock(&p.lock);
 	}
 
-	if(!ok || !load(index, ms, false)) {
+	if(!ok || !load(index, ms)) {
 		stop(seq, true);
 		return;
 	}
@@ -406,7 +414,6 @@ static bool advance(void) {
 	uint32_t hint = p.index;
 	uint32_t version;
 	uint32_t next;
-	bool repeat_queue;
 	bool pending;
 	bool loaded;
 	bool settled;
@@ -417,7 +424,6 @@ static bool advance(void) {
 		pthread_mutex_lock(&p.lock);
 		pending = p.pending;
 		version = p.version;
-		repeat_queue = p.repeat == REPEAT_QUEUE;
 		next = find(ended, hint);
 		if(next < p.count && p.repeat != REPEAT_TRACK) {
 			next++;
@@ -428,7 +434,7 @@ static bool advance(void) {
 			return false;
 		}
 
-		loaded = load(next, 0, repeat_queue);
+		loaded = load(next, 0);
 		pthread_mutex_lock(&p.lock);
 		settled = p.pending || p.version == version;
 		if(settled && loaded) {
@@ -547,6 +553,8 @@ static void* run(void* arg) {
 }
 
 bool player_init(int fd) {
+	int r;
+
 	p.notify = fd;
 	sem_init(&p.wake, 0, 0);
 	if(!out_init(wake)) {
@@ -554,8 +562,9 @@ bool player_init(int fd) {
 		return false;
 	}
 
-	if(pthread_create(&p.thread, nullptr, run, nullptr)) {
-		report("pthread_create: %s", strerror(errno));
+	r = pthread_create(&p.thread, nullptr, run, nullptr);
+	if(r) {
+		report("pthread_create: %s", strerror(r));
 		out_fini();
 		return false;
 	}

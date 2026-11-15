@@ -31,13 +31,20 @@ static const struct glyphs ascii = { "<<", ">>", "> ", "||", ">", "|", "=", "#",
 
 struct screen ui = { .msg_lock = PTHREAD_MUTEX_INITIALIZER, .tab = PANE_PAGE };
 
-// runs on any thread
+// runs on any thread, a line that does not fit loses its start and keeps the reason at its end
 static void on_report(const char* line) {
 	uint64_t one = 1;
+	size_t len = strlen(line);
+	size_t skip = len < sizeof(ui.msg_in) ? 0 : len - (sizeof(ui.msg_in) - 1);
 	ssize_t r;
 
+	// the cut does not fall inside a character
+	while(skip && ((unsigned char)line[skip] & 0xc0) == 0x80) {
+		skip++;
+	}
+
 	pthread_mutex_lock(&ui.msg_lock);
-	snprintf(ui.msg_in, sizeof(ui.msg_in), "%s", line);
+	memcpy(ui.msg_in, line + skip, len - skip + 1);
 	pthread_mutex_unlock(&ui.msg_lock);
 	r = write(ui.notify, &one, sizeof(one));
 	(void)r;
@@ -175,12 +182,15 @@ static void go(int i, int dir) {
 }
 
 // the selection of the queue follows the playing track unless the user is in the queue
-static void follow(void) {
+// rewind puts it on the first entry, which is where a queue that has played out starts again
+static void follow(bool rewind) {
 	struct list* l = &ui.lists[PANE_QUEUE];
 
 	l->count = (int)ui.s.count;
-	if(ui.s.track && ui.focus != PANE_QUEUE) {
+	if(ui.focus != PANE_QUEUE && ui.s.track) {
 		l->sel = (int)ui.s.index;
+	} else if(ui.focus != PANE_QUEUE && rewind) {
+		l->sel = 0;
 	}
 
 	l->sel = clamp(l->sel, 0, l->count ? l->count - 1 : 0);
@@ -342,7 +352,7 @@ static void click_title(int x) {
 static void click(int x, int y) {
 	if(!y) {
 		click_title(x);
-	} else if(y <= ui.rows) {
+	} else if(y >= 1 && y <= ui.rows) {
 		click_list(x, y - 1, false);
 	} else if(y == ui.h - 3) {
 		if(x >= ui.prev_x - 1 && x <= ui.prev_x + 2) {
@@ -526,7 +536,7 @@ static void key(int ch) {
 			layout();
 			show(&ui.lists[PANE_ARTISTS]);
 			select_row(ui.lists[PANE_PAGE].sel, 1);
-			follow();
+			follow(false);
 			break;
 		case 'q':
 		case 'C' & 0x1f:
@@ -595,12 +605,14 @@ static void bind_key(const char* cap, const char* xterm, int code) {
 static bool update_status(void) {
 	struct play_status s;
 	bool changed;
+	bool played_out;
 
 	player_status(&s);
 	changed = s.track != ui.s.track || s.queue != ui.s.queue || s.count != ui.s.count || s.index != ui.s.index;
+	played_out = ui.s.track && !s.track && ui.s.index + 1 == ui.s.count;
 	ui.s = s;
 	if(changed) {
-		follow();
+		follow(played_out);
 	}
 
 	return changed;

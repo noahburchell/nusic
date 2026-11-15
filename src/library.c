@@ -43,6 +43,12 @@ struct worker {
 	struct arena arena;
 };
 
+struct ancestor {
+	const struct ancestor* up;
+	dev_t                  dev;
+	ino_t                  ino;
+};
+
 static const char unknown_artist[] = "unknown artist";
 static const char unknown_album[] = "unknown album";
 
@@ -164,9 +170,12 @@ static void push(struct raws* rs, struct arena* a, const char* path, const struc
 	}
 }
 
-// the depth limit ends a loop of symlinks
-static void walk(struct raws* rs, struct arena* a, const char* dir, int depth, bool stats) {
+// a directory that is its own ancestor was reached through a loop of symlinks and is not read again
+// the depth limit bounds the stack
+static void walk(struct raws* rs, struct arena* a, const char* dir, const struct ancestor* up, int depth, bool stats) {
 	char path[PATH_MAX];
+	struct ancestor self = { .up = up };
+	const struct ancestor* k;
 	struct dirent* e;
 	struct stat st;
 	DIR* d = opendir(dir);
@@ -176,6 +185,21 @@ static void walk(struct raws* rs, struct arena* a, const char* dir, int depth, b
 		return;
 	}
 
+	if(fstat(dirfd(d), &st) < 0) {
+		report("stat %s: %s", dir, strerror(errno));
+		closedir(d);
+		return;
+	}
+
+	for(k = up; k; k = k->up) {
+		if(k->dev == st.st_dev && k->ino == st.st_ino) {
+			closedir(d);
+			return;
+		}
+	}
+
+	self.dev = st.st_dev;
+	self.ino = st.st_ino;
 	while((e = readdir(d))) {
 		unsigned type = e->d_type;
 		bool have = false;
@@ -199,7 +223,7 @@ static void walk(struct raws* rs, struct arena* a, const char* dir, int depth, b
 		}
 
 		if(type == DT_DIR && depth < MAX_DEPTH) {
-			walk(rs, a, path, depth + 1, stats);
+			walk(rs, a, path, &self, depth + 1, stats);
 		} else if(type == DT_REG && is_audio(e->d_name)) {
 			if(stats && !have && fstatat(dirfd(d), e->d_name, &st, 0) < 0) {
 				continue;
@@ -224,7 +248,7 @@ static bool collect(struct raws* rs, struct arena* a, const char* operand, bool 
 	}
 
 	if(S_ISDIR(st.st_mode)) {
-		walk(rs, a, path, 0, stats);
+		walk(rs, a, path, nullptr, 0, stats);
 	} else {
 		push(rs, a, path, stats ? &st : nullptr);
 	}

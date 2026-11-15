@@ -39,7 +39,7 @@ static struct {
 	atomic_bool               drained;
 	atomic_bool               failed;
 	atomic_bool               interrupt;
-	bool                      drain_sent;
+	atomic_bool               drain_sent;
 	bool                      ring_ready;
 } out;
 
@@ -120,8 +120,8 @@ static void on_process(void* data) {
 
 	if(have < want) {
 		memset((uint8_t*)d->data + (size_t)have * out.stride, 0, (size_t)(want - have) * out.stride);
-		if(!have && draining && !out.drain_sent) {
-			out.drain_sent = true;
+		if(!have && draining && !atomic_load_explicit(&out.drain_sent, memory_order_relaxed)) {
+			atomic_store(&out.drain_sent, true);
 			pw_loop_signal_event(out.events, out.drain);
 		}
 	}
@@ -132,8 +132,9 @@ static void on_process(void* data) {
 	pw_stream_queue_buffer(out.stream, b);
 }
 
+// the stream that asked may have been replaced since, the one in its place has not asked
 static void on_drain(void* data, uint64_t count) {
-	if(out.stream) {
+	if(out.stream && atomic_load(&out.drain_sent)) {
 		pw_stream_flush(out.stream, true);
 	}
 }
@@ -150,15 +151,7 @@ static const struct pw_stream_events stream_events = {
 	.drained = on_drained,
 };
 
-bool out_init(void (*wake)(void)) {
-	if(!out.ring_ready) {
-		ring_init(&out.ring);
-		out.ring_ready = true;
-	}
-
-	out.wake = wake;
-	atomic_store(&out.failed, false);
-	pw_init(nullptr, nullptr);
+static bool open_core(void) {
 	out.loop = pw_thread_loop_new("nusic", nullptr);
 	if(!out.loop) {
 		report("pw_thread_loop_new: %s", strerror(errno));
@@ -191,6 +184,25 @@ bool out_init(void (*wake)(void)) {
 	}
 
 	return true;
+}
+
+// failed is set again when the connection does not come up, so the caller knows to call out_init once more
+bool out_init(void (*wake)(void)) {
+	if(!out.ring_ready) {
+		ring_init(&out.ring);
+		out.ring_ready = true;
+	}
+
+	out.wake = wake;
+	atomic_store(&out.failed, false);
+	pw_init(nullptr, nullptr);
+	if(open_core()) {
+		return true;
+	}
+
+	atomic_store(&out.failed, true);
+
+	return false;
 }
 
 static void close_stream(void) {
@@ -263,7 +275,7 @@ static bool open_stream(const struct spa_audio_info_raw* fmt, uint32_t stride) {
 	out.stride = stride;
 	out.reserve = out.ring.size / RESERVE_DIV / stride * stride;
 	out.urgent = 0;
-	out.drain_sent = false;
+	atomic_store(&out.drain_sent, false);
 	atomic_store(&out.played, 0);
 	atomic_store(&out.draining, false);
 	atomic_store(&out.drained, false);
