@@ -1,0 +1,31 @@
+ACLOCAL_AMFLAGS = -I m4
+
+AM_CPPFLAGS = \
+	-I$(top_builddir) \
+	-I$(top_srcdir)/src \
+	-include $(top_builddir)/config.h \
+	$(NCURSES_CFLAGS) \
+	$(PIPEWIRE_CFLAGS) \
+	$(FFMPEG_CFLAGS)
+
+AM_CFLAGS  = @NUSIC_OPT_CFLAGS@
+AM_LDFLAGS = @NUSIC_OPT_LDFLAGS@
+
+# user flags may override optimisation but not warnings or hardening
+COMPILE = $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) \
+	$(AM_CFLAGS) $(CFLAGS) $(NUSIC_CPPFLAGS) $(NUSIC_CFLAGS)
+LINK = $(CCLD) $(AM_CFLAGS) $(CFLAGS) $(NUSIC_CFLAGS) $(AM_LDFLAGS) $(LDFLAGS) $(NUSIC_LDFLAGS) -o $@
+
+bin_PROGRAMS = nusic
+
+nusic_SOURCES = \
+	src/nusic.c
+
+nusic_LDADD = \
+	$(NCURSES_LIBS) \
+	$(PIPEWIRE_LIBS) \
+	$(FFMPEG_LIBS)
+
+EXTRA_DIST = \
+	README.org \
+	autogen.sh
