@@ -212,6 +212,7 @@ AS_IF([test "x$enable_hardened" = xyes], [
 NUSIC_REQUIRE([NCURSES], [ncursesw >= 6.0])
 NUSIC_REQUIRE([PIPEWIRE], [libpipewire-0.3])
 NUSIC_REQUIRE([FFMPEG], [libavformat >= 59.27 libavcodec >= 59.37 libswresample >= 4.7 libavutil >= 57.28])
+NUSIC_REQUIRE([SQLITE], [sqlite3 >= 3.37.0])
 
 nusic_ncurses_version=`$PKG_CONFIG --modversion ncursesw`
 nusic_pipewire_version=`$PKG_CONFIG --modversion libpipewire-0.3`

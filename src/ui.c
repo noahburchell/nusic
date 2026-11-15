@@ -2,6 +2,7 @@
 
 #include "player.h"
 #include "report.h"
+#include "screen.h"
 
 #include <curses.h>
 #include <fcntl.h>
@@ -12,77 +13,22 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <wchar.h>
 
 #define MIN_W     40
 #define MIN_H     9
+#define SPLIT_W   120
 #define SEEK_MS   5000
 #define WHEEL     3
 #define DOUBLE_MS 400
-#define ACCENT    COLOR_PAIR(1)
 
-enum {
-	ROW_ALBUM,
-	ROW_TRACK,
-	ROW_SPACE,
-};
+// control or meta with an arrow has no key code of its own, these stand for it
+#define KEY_ENTRY_UP   (KEY_MAX + 1000)
+#define KEY_ENTRY_DOWN (KEY_MAX + 1001)
 
-// every glyph is in code page 437, so the linux console font has it
-struct glyphs {
-	const char* prev;
-	const char* next;
-	const char* play;
-	const char* pause;
-	const char* now;
-	const char* select;
-	const char* elapsed;
-	const char* knob;
-};
+static const struct glyphs cp437 = { "◄◄", "►►", "► ", "▌▌", "►", "▌", "═", "■", "∞" };
+static const struct glyphs ascii = { "<<", ">>", "> ", "||", ">", "|", "=", "#", "R" };
 
-static const struct glyphs cp437 = { "◄◄", "►►", "► ", "▌▌", "►", "▌", "═", "■" };
-static const struct glyphs ascii = { "<<", ">>", "> ", "||", ">", "|", "=", "#" };
-
-struct row {
-	uint32_t id;
-	uint8_t  kind;
-};
-
-struct list {
-	int top;
-	int sel;
-	int count;
-};
-
-// side and main are the inner widths of the two panes, rows their height
-// the hit boxes of the bar are set when it is drawn
-static struct {
-	const struct library* lib;
-	const struct glyphs*  g;
-	const struct track*   playing;
-	struct row*           page_rows;
-	struct list           artists;
-	struct list           page;
-	pthread_mutex_t       msg_lock;
-	char                  msg_in[256];
-	char                  msg[256];
-	struct timespec       click_time;
-	int                   click_row;
-	int                   notify;
-	int                   w;
-	int                   h;
-	int                   side;
-	int                   main_x;
-	int                   main_w;
-	int                   rows;
-	int                   prev_x;
-	int                   play_x;
-	int                   next_x;
-	int                   bar_x;
-	int                   bar_w;
-	uint32_t              bar_ms;
-	bool                  focus_page;
-	bool                  quit;
-} ui = { .msg_lock = PTHREAD_MUTEX_INITIALIZER };
+struct screen ui = { .msg_lock = PTHREAD_MUTEX_INITIALIZER, .tab = PANE_PAGE };
 
 // runs on any thread
 static void on_report(const char* line) {
@@ -96,117 +42,7 @@ static void on_report(const char* line) {
 	(void)r;
 }
 
-// the next character of s and its width in columns, a byte that is not valid in the locale
-// or does not print shows as a question mark
-static int next_char(wchar_t* wc, const char** s, size_t* left, mbstate_t* st) {
-	size_t n = mbrtowc(wc, *s, *left, st);
-	int cw;
-
-	if(n == (size_t)-1 || n == (size_t)-2 || !n) {
-		memset(st, 0, sizeof(*st));
-		*wc = L'?';
-		n = 1;
-	}
-
-	cw = wcwidth(*wc);
-	if(cw < 0) {
-		*wc = L'?';
-		cw = 1;
-	}
-
-	*s += n;
-	*left -= n;
-
-	return cw;
-}
-
-// writes s at y, x in at most w columns, cut with two dots when it is wider
-// pad fills the rest of the w columns with spaces, returns the columns written
-static int text(int y, int x, int w, const char* s, bool pad) {
-	wchar_t buf[256];
-	mbstate_t st = { 0 };
-	size_t left = strlen(s);
-	bool cut = false;
-	int used = 0;
-	int len = 0;
-	int i;
-
-	if(w <= 0) {
-		return 0;
-	}
-
-	while(left && len < 250) {
-		int cw = next_char(&buf[len], &s, &left, &st);
-
-		if(used + cw > w) {
-			cut = true;
-			break;
-		}
-
-		len++;
-		used += cw;
-	}
-
-	if(cut && w >= 2) {
-		while(len && used > w - 2) {
-			used -= wcwidth(buf[--len]);
-		}
-
-		buf[len++] = L'.';
-		buf[len++] = L'.';
-		used += 2;
-	}
-
-	mvaddnwstr(y, x, buf, len);
-	for(i = used; pad && i < w; i++) {
-		addch(' ');
-	}
-
-	return pad ? w : used;
-}
-
-// like text without padding, but a string wider than w loses its start
-// a diagnostic ends in the reason, which is the part worth keeping
-static int text_tail(int y, int x, int w, const char* s) {
-	wchar_t buf[512];
-	uint8_t width[512];
-	mbstate_t st = { 0 };
-	size_t left = strlen(s);
-	int used = 0;
-	int len = 0;
-	int from = 0;
-
-	while(left && len < 510) {
-		width[len] = (uint8_t)next_char(&buf[len], &s, &left, &st);
-		used += width[len++];
-	}
-
-	if(used <= w) {
-		mvaddnwstr(y, x, buf, len);
-		return used;
-	}
-
-	while(from < len && used > w - 2) {
-		used -= width[from++];
-	}
-
-	mvaddstr(y, x, "..");
-	addnwstr(&buf[from], len - from);
-
-	return used + 2;
-}
-
-static void time_text(char* buf, size_t n, uint32_t ms) {
-	uint32_t s = ms / 1000;
-
-	if(s >= 3600) {
-		snprintf(buf, n, "%u:%02u:%02u", s / 3600, s / 60 % 60, s % 60);
-	} else {
-		snprintf(buf, n, "%u:%02u", s / 60, s % 60);
-	}
-}
-
-static int clamp(int v, int lo, int hi) {
+int clamp(int v, int lo, int hi) {
 	if(v < lo) {
 		return lo;
 	}
@@ -214,16 +50,39 @@ static int clamp(int v, int lo, int hi) {
 	return v > hi ? hi : v;
 }
 
+// the page and the queue sit side by side from SPLIT_W columns on, each then has 41 or more
 static void layout(void) {
+	int half;
+
 	getmaxyx(stdscr, ui.h, ui.w);
 	ui.side = clamp(ui.w * 28 / 100, 16, 34);
 	ui.main_x = ui.side + 2;
 	ui.main_w = ui.w - 1 - ui.main_x;
 	ui.rows = ui.h - 5;
+	half = (ui.main_w - 1) / 2;
+	ui.split = ui.w >= SPLIT_W;
+	ui.x[PANE_ARTISTS] = 1;
+	ui.pane_w[PANE_ARTISTS] = ui.side;
+	ui.x[PANE_PAGE] = ui.main_x;
+	ui.pane_w[PANE_PAGE] = ui.split ? half : ui.main_w;
+	ui.x[PANE_QUEUE] = ui.split ? ui.main_x + half + 1 : ui.main_x;
+	ui.pane_w[PANE_QUEUE] = ui.split ? ui.main_w - half - 1 : ui.main_w;
 }
 
-static bool too_small(void) {
+bool too_small(void) {
 	return ui.w < MIN_W || ui.h < MIN_H;
+}
+
+bool shown(enum pane p) {
+	return p == PANE_ARTISTS || ui.split || p == ui.tab;
+}
+
+// the pane with the focus always shows, so it becomes the tab
+static void focus(enum pane p) {
+	ui.focus = p;
+	if(p != PANE_ARTISTS) {
+		ui.tab = p;
+	}
 }
 
 static void show(struct list* l) {
@@ -240,7 +99,7 @@ static void scroll_by(struct list* l, int n) {
 
 // the rows of the selected artist: every album as a heading, its tracks and a blank row
 static void build_page(void) {
-	const struct artist* a = &ui.lib->artists[ui.artists.sel];
+	const struct artist* a = &ui.lib->artists[ui.lists[PANE_ARTISTS].sel];
 	struct row* r = realloc(ui.page_rows, (a->tracks + 2 * a->count) * sizeof(*r));
 	uint32_t i;
 	uint32_t k;
@@ -262,330 +121,330 @@ static void build_page(void) {
 	}
 
 	ui.page_rows = r;
-	ui.page = (struct list){ 0, 1, n - 1 };
+	ui.lists[PANE_PAGE] = (struct list){ 0, 1, n - 1 };
 	ui.click_row = -1;
 }
 
 static void select_artist(int i) {
-	i = clamp(i, 0, ui.artists.count - 1);
-	if(i != ui.artists.sel) {
-		ui.artists.sel = i;
+	struct list* l = &ui.lists[PANE_ARTISTS];
+
+	i = clamp(i, 0, l->count - 1);
+	if(i != l->sel) {
+		l->sel = i;
 		build_page();
 	}
 
-	show(&ui.artists);
+	show(l);
 }
 
 // a blank row is skipped in the direction of travel
 static void select_row(int i, int dir) {
-	i = clamp(i, 0, ui.page.count - 1);
+	struct list* l = &ui.lists[PANE_PAGE];
+
+	i = clamp(i, 0, l->count - 1);
 	while(ui.page_rows[i].kind == ROW_SPACE) {
 		i += dir;
 	}
 
-	ui.page.sel = i;
-	show(&ui.page);
+	l->sel = i;
+	show(l);
 	// the heading of an album stays in view above its first track
-	if(i && ui.page.top == i && ui.page_rows[i - 1].kind == ROW_ALBUM) {
-		ui.page.top--;
+	if(i && l->top == i && ui.page_rows[i - 1].kind == ROW_ALBUM) {
+		l->top--;
+	}
+}
+
+static void select_entry(int i) {
+	struct list* l = &ui.lists[PANE_QUEUE];
+
+	if(l->count) {
+		l->sel = clamp(i, 0, l->count - 1);
+		show(l);
 	}
 }
 
 static void go(int i, int dir) {
-	if(ui.focus_page) {
+	if(ui.focus == PANE_PAGE) {
 		select_row(i, dir);
+	} else if(ui.focus == PANE_QUEUE) {
+		select_entry(i);
 	} else {
 		select_artist(i);
 	}
 }
 
-static struct list* focused(void) {
-	return ui.focus_page ? &ui.page : &ui.artists;
+// the selection of the queue follows the playing track unless the user is in the queue
+static void follow(void) {
+	struct list* l = &ui.lists[PANE_QUEUE];
+
+	l->count = (int)ui.s.count;
+	if(ui.s.track && ui.focus != PANE_QUEUE) {
+		l->sel = (int)ui.s.index;
+	}
+
+	l->sel = clamp(l->sel, 0, l->count ? l->count - 1 : 0);
+	scroll_by(l, 0);
+	show(l);
 }
 
-// a track plays in the context of its artist, so the albums after it follow on
+// a track or an album goes to the top of the queue and plays, what the queue held follows it
 static void activate(void) {
-	const struct artist* a = &ui.lib->artists[ui.artists.sel];
-	const struct row* r = &ui.page_rows[ui.page.sel];
-	uint32_t t = r->kind == ROW_ALBUM ? ui.lib->albums[r->id].first : r->id;
+	const struct row* r = &ui.page_rows[ui.lists[PANE_PAGE].sel];
+	const struct list* q = &ui.lists[PANE_QUEUE];
 
-	if(!ui.focus_page) {
-		ui.focus_page = true;
+	if(ui.focus == PANE_ARTISTS) {
+		focus(PANE_PAGE);
+	} else if(ui.focus == PANE_PAGE && r->kind == ROW_ALBUM) {
+		player_start(&ui.lib->tracks[ui.lib->albums[r->id].first], ui.lib->albums[r->id].count);
+	} else if(ui.focus == PANE_PAGE) {
+		player_start(&ui.lib->tracks[r->id], 1);
+	} else if(q->sel < q->count) {
+		player_jump((uint32_t)q->sel);
+	}
+}
+
+// the selection goes to the end of the queue: a track, the tracks of an album or those of an artist
+static void enqueue(void) {
+	const struct artist* a = &ui.lib->artists[ui.lists[PANE_ARTISTS].sel];
+	const struct row* r = &ui.page_rows[ui.lists[PANE_PAGE].sel];
+	const struct track* first = &ui.lib->tracks[a->first_track];
+	const char* name = a->name;
+	uint32_t n = a->tracks;
+
+	if(ui.focus == PANE_QUEUE) {
 		return;
 	}
 
-	player_play(&ui.lib->tracks[a->first_track], a->tracks, t - a->first_track);
-}
+	if(ui.focus == PANE_PAGE && r->kind == ROW_ALBUM) {
+		first = &ui.lib->tracks[ui.lib->albums[r->id].first];
+		name = ui.lib->albums[r->id].title;
+		n = ui.lib->albums[r->id].count;
+	} else if(ui.focus == PANE_PAGE) {
+		first = &ui.lib->tracks[r->id];
+		name = first->title;
+		n = 1;
+	}
 
-static void draw_frame(void) {
-	const char* name = ui.lib->artists[ui.artists.sel].name;
-	int sep = ui.h - 4;
-	int x;
-
-	mvhline(0, 1, ACS_HLINE, ui.w - 2);
-	mvhline(sep, 1, ACS_HLINE, ui.w - 2);
-	mvhline(ui.h - 1, 1, ACS_HLINE, ui.w - 2);
-	mvvline(1, 0, ACS_VLINE, ui.h - 2);
-	mvvline(1, ui.w - 1, ACS_VLINE, ui.h - 2);
-	mvvline(1, ui.side + 1, ACS_VLINE, ui.rows);
-	mvaddch(0, 0, ACS_ULCORNER);
-	mvaddch(0, ui.w - 1, ACS_URCORNER);
-	mvaddch(0, ui.side + 1, ACS_TTEE);
-	mvaddch(sep, 0, ACS_LTEE);
-	mvaddch(sep, ui.w - 1, ACS_RTEE);
-	mvaddch(sep, ui.side + 1, ACS_BTEE);
-	mvaddch(ui.h - 1, 0, ACS_LLCORNER);
-	mvaddch(ui.h - 1, ui.w - 1, ACS_LRCORNER);
-	attrset(ui.focus_page ? A_NORMAL : A_BOLD);
-	mvaddch(0, 2, ' ');
-	x = 3 + text(0, 3, ui.side - 3, "album artists", false);
-	mvaddch(0, x, ' ');
-	attrset(ui.focus_page ? A_BOLD : A_NORMAL);
-	mvaddch(0, ui.main_x + 1, ' ');
-	x = ui.main_x + 2 + text(0, ui.main_x + 2, ui.main_w - 4, name, false);
-	mvaddch(0, x, ' ');
-	attrset(A_NORMAL);
-	if(ui.msg[0]) {
-		mvaddch(ui.h - 1, 2, ' ');
-		x = 3 + text_tail(ui.h - 1, 3, ui.w - 6, ui.msg);
-		mvaddch(ui.h - 1, x, ' ');
+	player_add(first, n);
+	if(n == 1) {
+		snprintf(ui.msg, sizeof(ui.msg), "queued: %s", name);
+	} else {
+		snprintf(ui.msg, sizeof(ui.msg), "queued %u tracks: %s", n, name);
 	}
 }
 
-static attr_t row_attr(bool selected, bool pane_focused) {
-	if(!selected) {
-		return A_NORMAL;
-	}
+// the selected entry of the queue trades places with the one above or below it and stays selected
+static void move_entry(int dir) {
+	struct list* l = &ui.lists[PANE_QUEUE];
+	int to = l->sel + dir;
 
-	return pane_focused ? A_REVERSE : A_BOLD;
+	if(ui.focus == PANE_QUEUE && to >= 0 && to < l->count) {
+		player_move((uint32_t)l->sel, (uint32_t)to);
+		l->sel = to;
+		show(l);
+	}
 }
 
-static void draw_artists(void) {
-	int i;
+// the entry that follows takes the place of the selected one, and with it the selection
+static void remove_entry(void) {
+	const struct list* l = &ui.lists[PANE_QUEUE];
 
-	for(i = ui.artists.top; i < ui.artists.count && i < ui.artists.top + ui.rows; i++) {
-		int y = 1 + i - ui.artists.top;
-		bool selected = i == ui.artists.sel;
-
-		attrset(row_attr(selected, !ui.focus_page));
-		text(y, 1, 1, selected ? ui.g->select : " ", true);
-		text(y, 2, ui.side - 1, ui.lib->artists[i].name, true);
+	if(ui.focus == PANE_QUEUE && l->sel < l->count) {
+		player_remove((uint32_t)l->sel);
 	}
-
-	attrset(A_NORMAL);
 }
 
-// marker 1 column, year or number 4, gap 2, title, duration 8
-static void draw_page(void) {
-	char dur[16];
-	int x = ui.main_x;
-	int title_w = ui.main_w - 15;
-	int i;
-
-	for(i = ui.page.top; i < ui.page.count && i < ui.page.top + ui.rows; i++) {
-		const struct row* r = &ui.page_rows[i];
-		int y = 1 + i - ui.page.top;
-		bool selected = i == ui.page.sel;
-		attr_t attr = row_attr(selected, ui.focus_page);
-
-		if(r->kind == ROW_SPACE) {
-			continue;
-		}
-
-		if(r->kind == ROW_ALBUM) {
-			const struct album* al = &ui.lib->albums[r->id];
-
-			attrset(attr | A_BOLD);
-			text(y, x, 1, selected ? ui.g->select : " ", true);
-			if(al->year) {
-				printw("%4u  ", al->year);
-			} else {
-				addstr("      ");
-			}
-
-			text(y, x + 7, ui.main_w - 7, al->title, true);
-		} else {
-			const struct track* t = &ui.lib->tracks[r->id];
-			bool playing = t == ui.playing;
-
-			time_text(dur, sizeof(dur), t->duration);
-			attrset(playing ? attr | ACCENT | A_BOLD : attr);
-			text(y, x, 1, selected ? ui.g->select : " ", true);
-			if(playing) {
-				addstr("   ");
-				text(y, x + 4, 1, ui.g->now, true);
-				addstr("  ");
-			} else if(t->number) {
-				printw("%4u  ", t->number);
-			} else {
-				addstr("      ");
-			}
-
-			text(y, x + 7, title_w, t->title, true);
-			mvprintw(y, x + 7 + title_w, "%7s ", t->duration ? dur : "");
-		}
+static void clear_queue(void) {
+	if(ui.focus == PANE_QUEUE) {
+		player_clear();
 	}
-
-	attrset(A_NORMAL);
 }
 
-static void draw_bar(const struct play_status* s) {
-	char pos[16] = "";
-	char dur[16] = "";
-	char line[512];
-	int y = ui.h - 3;
-	int inner = ui.w - 2;
-	int left = clamp(inner * 32 / 100, 12, 46);
-	int cx;
-	int cw;
-	int tw;
-	int filled = 0;
-	int i;
-
-	cx = 1 + left + 1;
-	cw = ui.w - 2 - cx;
-	attrset(A_NORMAL);
-	mvhline(y, 1, ' ', inner);
-	mvhline(y + 1, 1, ' ', inner);
-	if(s->track) {
-		const struct album* al = &ui.lib->albums[s->track->album];
-
-		time_text(pos, sizeof(pos), s->position);
-		time_text(dur, sizeof(dur), s->track->duration);
-		snprintf(line, sizeof(line), "%s - %s", s->track->artist, al->title);
-		attrset(A_BOLD);
-		text(y, 2, left - 1, s->track->title, false);
-		attrset(A_DIM);
-		text(y + 1, 2, left - 1, line, false);
-		attrset(A_NORMAL);
+// with nothing playing the queue starts at its selected entry
+static void toggle(void) {
+	if(!ui.s.track && ui.s.count) {
+		player_jump((uint32_t)ui.lists[PANE_QUEUE].sel);
+	} else {
+		player_toggle();
 	}
-
-	ui.prev_x = cx + (cw - 12) / 2;
-	ui.play_x = ui.prev_x + 5;
-	ui.next_x = ui.prev_x + 10;
-	text(y, ui.prev_x, 2, ui.g->prev, false);
-	text(y, ui.play_x, 2, s->state == PLAY_PLAYING ? ui.g->pause : ui.g->play, false);
-	text(y, ui.next_x, 2, ui.g->next, false);
-	tw = (int)strlen(dur) < 4 ? 4 : (int)strlen(dur);
-	ui.bar_x = cx + tw + 1;
-	ui.bar_w = cw - 2 * tw - 3;
-	ui.bar_ms = s->track ? s->track->duration : 0;
-	if(ui.bar_w < 4) {
-		ui.bar_w = 0;
-		return;
-	}
-
-	mvprintw(y + 1, cx, "%*s", tw, pos);
-	mvprintw(y + 1, ui.bar_x + ui.bar_w + 1, "%s", dur);
-	if(ui.bar_ms) {
-		filled = (int)((uint64_t)s->position * (uint32_t)(ui.bar_w - 1) / ui.bar_ms);
-		filled = filled > ui.bar_w - 1 ? ui.bar_w - 1 : filled;
-	}
-
-	attrset(ACCENT | A_BOLD);
-	for(i = 0; i < filled; i++) {
-		text(y + 1, ui.bar_x + i, 1, ui.g->elapsed, false);
-	}
-
-	if(s->track) {
-		text(y + 1, ui.bar_x + filled, 1, ui.g->knob, false);
-		filled++;
-	}
-
-	attrset(A_DIM);
-	mvhline(y + 1, ui.bar_x + filled, ACS_HLINE, ui.bar_w - filled);
-	attrset(A_NORMAL);
 }
 
-static void draw(const struct play_status* s) {
-	erase();
-	if(too_small()) {
-		mvaddnstr(0, 0, "terminal is too small", ui.w);
-		return;
-	}
-
-	draw_frame();
-	draw_artists();
-	draw_page();
-	draw_bar(s);
-}
-
-static bool double_click(int row) {
+static bool double_click(enum pane p, int row) {
 	struct timespec now;
 	int64_t ms;
 	bool twice;
 
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	ms = (int64_t)(now.tv_sec - ui.click_time.tv_sec) * 1000 + (now.tv_nsec - ui.click_time.tv_nsec) / 1000000;
-	twice = row == ui.click_row && ms < DOUBLE_MS;
+	twice = p == ui.click_pane && row == ui.click_row && ms < DOUBLE_MS;
+	ui.click_pane = p;
 	ui.click_row = twice ? -1 : row;
 	ui.click_time = now;
 
 	return twice;
 }
 
-static void click(int x, int y) {
-	int row = y - 1;
+// the pane that shows at column x
+static enum pane pane_at(int x) {
+	if(x <= ui.side) {
+		return PANE_ARTISTS;
+	}
 
-	if(row >= 0 && row < ui.rows && x >= 1 && x <= ui.side) {
-		ui.focus_page = false;
-		if(ui.artists.top + row < ui.artists.count) {
-			select_artist(ui.artists.top + row);
+	if(!ui.split) {
+		return ui.tab;
+	}
+
+	return x >= ui.x[PANE_QUEUE] ? PANE_QUEUE : PANE_PAGE;
+}
+
+// add puts the row into the queue, otherwise a second click on it plays it
+static void click_list(int x, int row, bool add) {
+	enum pane p = pane_at(x);
+	struct list* l = &ui.lists[p];
+	int i = l->top + row;
+
+	if(x < ui.x[p] || x >= ui.x[p] + ui.pane_w[p]) {
+		return;
+	}
+
+	focus(p);
+	if(i >= l->count) {
+		return;
+	}
+
+	if(p == PANE_ARTISTS) {
+		select_artist(i);
+	} else if(p == PANE_QUEUE || ui.page_rows[i].kind != ROW_SPACE) {
+		l->sel = i;
+		if(!add && double_click(p, i)) {
+			activate();
 		}
-	} else if(row >= 0 && row < ui.rows && x >= ui.main_x && x < ui.main_x + ui.main_w) {
-		row += ui.page.top;
-		ui.focus_page = true;
-		if(row < ui.page.count && ui.page_rows[row].kind != ROW_SPACE) {
-			ui.page.sel = row;
-			if(double_click(row)) {
-				activate();
-			}
+	} else {
+		return;
+	}
+
+	if(add) {
+		enqueue();
+	}
+}
+
+static void click_title(int x) {
+	enum pane p;
+
+	for(p = PANE_ARTISTS; p < PANES; p++) {
+		if(x >= ui.title_x[p] && x < ui.title_end[p]) {
+			focus(p);
 		}
+	}
+}
+
+static void click(int x, int y) {
+	if(!y) {
+		click_title(x);
+	} else if(y <= ui.rows) {
+		click_list(x, y - 1, false);
 	} else if(y == ui.h - 3) {
 		if(x >= ui.prev_x - 1 && x <= ui.prev_x + 2) {
 			player_prev();
 		} else if(x >= ui.play_x - 1 && x <= ui.play_x + 2) {
-			player_toggle();
+			toggle();
 		} else if(x >= ui.next_x - 1 && x <= ui.next_x + 2) {
 			player_next();
+		} else if(x >= ui.repeat_x - 1 && x <= ui.repeat_x + 2) {
+			player_repeat();
 		}
 	} else if(y == ui.h - 2 && ui.bar_w > 1 && ui.bar_ms && x >= ui.bar_x && x < ui.bar_x + ui.bar_w) {
 		player_seek_to((uint32_t)((uint64_t)ui.bar_ms * (uint32_t)(x - ui.bar_x) / (uint32_t)(ui.bar_w - 1)));
 	}
 }
 
-static void mouse(void) {
-	MEVENT e;
-
-	if(getmouse(&e) != OK || too_small()) {
-		return;
+// ncurses merges a press and a release that arrive together, and such clicks into multiples
+static int clicks(mmask_t b) {
+	if(b & BUTTON1_TRIPLE_CLICKED) {
+		return 3;
 	}
 
-	if(e.bstate & (BUTTON4_PRESSED | BUTTON5_PRESSED)) {
-		if(e.y >= 1 && e.y <= ui.rows) {
-			scroll_by(e.x > ui.side ? &ui.page : &ui.artists, e.bstate & BUTTON4_PRESSED ? -WHEEL : WHEEL);
+	if(b & BUTTON1_DOUBLE_CLICKED) {
+		return 2;
+	}
+
+	return b & (BUTTON1_PRESSED | BUTTON1_CLICKED) ? 1 : 0;
+}
+
+// one KEY_MOUSE stands for every event that is queued
+static void mouse(void) {
+	MEVENT e;
+	int n;
+
+	while(getmouse(&e) == OK) {
+		if(too_small()) {
+			continue;
 		}
-	} else if(e.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED)) {
-		click(e.x, e.y);
+
+		// a release does nothing and leaves the message of its press in place
+		if(e.bstate & (BUTTON4_PRESSED | BUTTON5_PRESSED | BUTTON3_PRESSED | BUTTON3_CLICKED) || clicks(e.bstate)) {
+			ui.msg[0] = 0;
+		}
+
+		if(e.bstate & (BUTTON4_PRESSED | BUTTON5_PRESSED)) {
+			if(e.y >= 1 && e.y <= ui.rows) {
+				scroll_by(&ui.lists[pane_at(e.x)], e.bstate & BUTTON4_PRESSED ? -WHEEL : WHEEL);
+			}
+
+			continue;
+		}
+
+		if(e.bstate & (BUTTON3_PRESSED | BUTTON3_CLICKED)) {
+			if(e.y >= 1 && e.y <= ui.rows) {
+				click_list(e.x, e.y - 1, true);
+			}
+
+			continue;
+		}
+
+		for(n = clicks(e.bstate); n; n--) {
+			click(e.x, e.y);
+		}
 	}
 }
 
-// meta arrives as escape followed by the key
+// meta arrives as escape followed by the key, on the linux console that holds for the arrows too
 static void meta_key(int ch) {
+	const struct list* l = &ui.lists[ui.focus];
+
 	if(ch == 'v') {
-		go(focused()->sel - (ui.rows - 1), -1);
+		go(l->sel - (ui.rows - 1), -1);
 	} else if(ch == '<') {
 		go(0, 1);
 	} else if(ch == '>') {
-		go(focused()->count - 1, -1);
+		go(l->count - 1, -1);
+	} else if(ch == 'p' || ch == KEY_UP) {
+		move_entry(-1);
+	} else if(ch == 'n' || ch == KEY_DOWN) {
+		move_entry(1);
+	} else if(ch == 'k') {
+		clear_queue();
 	}
 }
 
 static void key(int ch) {
-	struct list* l = focused();
+	const struct list* l = &ui.lists[ui.focus];
 
-	ui.msg[0] = 0;
+	if(ch != KEY_MOUSE) {
+		ui.msg[0] = 0;
+	}
+
 	switch(ch) {
+		case KEY_ENTRY_UP:
+			move_entry(-1);
+			break;
+		case KEY_ENTRY_DOWN:
+			move_entry(1);
+			break;
+		case KEY_DC:
+		case 'K' & 0x1f:
+			remove_entry();
+			break;
 		case KEY_UP:
 		case 'P' & 0x1f:
 			go(l->sel - 1, -1);
@@ -609,14 +468,23 @@ static void key(int ch) {
 			break;
 		case KEY_RIGHT:
 		case 'F' & 0x1f:
-			ui.focus_page = true;
+			if(ui.focus < PANE_QUEUE) {
+				focus((enum pane)(ui.focus + 1));
+			}
+
 			break;
 		case KEY_LEFT:
 		case 'B' & 0x1f:
-			ui.focus_page = false;
+			if(ui.focus > PANE_ARTISTS) {
+				focus((enum pane)(ui.focus - 1));
+			}
+
 			break;
 		case '\t':
-			ui.focus_page = !ui.focus_page;
+			focus((enum pane)((ui.focus + 1) % PANES));
+			break;
+		case KEY_BTAB:
+			focus((enum pane)((ui.focus + PANES - 1) % PANES));
 			break;
 		case '\n':
 		case '\r':
@@ -624,7 +492,10 @@ static void key(int ch) {
 			activate();
 			break;
 		case ' ':
-			player_toggle();
+			toggle();
+			break;
+		case 'a':
+			enqueue();
 			break;
 		case '<':
 			player_prev();
@@ -638,6 +509,9 @@ static void key(int ch) {
 		case '.':
 			player_seek_by(SEEK_MS);
 			break;
+		case 'r':
+			player_repeat();
+			break;
 		case 27:
 			meta_key(getch());
 			break;
@@ -649,8 +523,9 @@ static void key(int ch) {
 			break;
 		case KEY_RESIZE:
 			layout();
-			show(&ui.artists);
-			select_row(ui.page.sel, 1);
+			show(&ui.lists[PANE_ARTISTS]);
+			select_row(ui.lists[PANE_PAGE].sel, 1);
+			follow();
 			break;
 		case 'q':
 		case 'C' & 0x1f:
@@ -705,9 +580,33 @@ static int hide_stderr(void) {
 	return saved;
 }
 
+// terminfo names the sequence of an arrow with a modifier where the terminal has one, otherwise it is the one of xterm
+static void bind_key(const char* cap, const char* xterm, int code) {
+	const char* s = tigetstr(cap);
+
+	define_key(xterm, code);
+	if(s && s != (const char*)-1) {
+		define_key(s, code);
+	}
+}
+
+// true when the track or the queue is another one
+static bool update_status(void) {
+	struct play_status s;
+	bool changed;
+
+	player_status(&s);
+	changed = s.track != ui.s.track || s.queue != ui.s.queue || s.count != ui.s.count || s.index != ui.s.index;
+	ui.s = s;
+	if(changed) {
+		follow();
+	}
+
+	return changed;
+}
+
 void ui_run(const struct library* lib, int notify) {
 	struct pollfd fds[2] = { { 0, POLLIN, 0 }, { notify, POLLIN, 0 } };
-	struct play_status s;
 	uint64_t count;
 	bool dirty = true;
 	int saved;
@@ -716,7 +615,7 @@ void ui_run(const struct library* lib, int notify) {
 	ui.lib = lib;
 	ui.notify = notify;
 	ui.g = strcmp(nl_langinfo(CODESET), "UTF-8") ? &ascii : &cp437;
-	ui.artists = (struct list){ 0, 0, (int)lib->n_artists };
+	ui.lists[PANE_ARTISTS] = (struct list){ 0, 0, (int)lib->n_artists };
 	initscr();
 	raw();
 	noecho();
@@ -724,8 +623,13 @@ void ui_run(const struct library* lib, int notify) {
 	nodelay(stdscr, TRUE);
 	curs_set(0);
 	set_escdelay(25);
+	bind_key("kUP5", "\033[1;5A", KEY_ENTRY_UP);
+	bind_key("kDN5", "\033[1;5B", KEY_ENTRY_DOWN);
+	bind_key("kUP3", "\033[1;3A", KEY_ENTRY_UP);
+	bind_key("kDN3", "\033[1;3B", KEY_ENTRY_DOWN);
 	mouseinterval(0);
-	mousemask(BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED | BUTTON4_PRESSED | BUTTON5_PRESSED, nullptr);
+	// getch blocks after a mouse event that the mask leaves out, nodelay or not, so the mask takes every button event
+	mousemask(ALL_MOUSE_EVENTS, nullptr);
 	if(has_colors()) {
 		start_color();
 		use_default_colors();
@@ -737,22 +641,20 @@ void ui_run(const struct library* lib, int notify) {
 	layout();
 	build_page();
 	while(!ui.quit) {
-		player_status(&s);
-		if(s.track != ui.playing) {
-			ui.playing = s.track;
+		if(update_status()) {
 			dirty = true;
 		}
 
 		if(dirty) {
 			take_message();
-			draw(&s);
+			draw();
 		} else if(!too_small()) {
-			draw_bar(&s);
+			draw_bar();
 		}
 
 		refresh();
 		dirty = false;
-		poll(fds, 2, timeout_ms(&s));
+		poll(fds, 2, timeout_ms(&ui.s));
 		if(read(notify, &count, sizeof(count)) > 0) {
 			dirty = true;
 		}

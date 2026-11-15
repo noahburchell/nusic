@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -23,30 +24,41 @@ enum phase {
 	ENDING,
 };
 
-// from frame at of the stream on, the audio is track, starting at its frame base
+// from frame at of the stream on, the audio is the track of entry id, starting at its frame base
+// index is where the entry was in the queue, which is where the search for it starts
 struct mark {
 	const struct track* track;
 	uint64_t            at;
 	int64_t             base;
+	uint32_t            id;
 	uint32_t            index;
 };
 
 // lock guards queue to rate, the fields after rate belong to the player thread
 // a command stays pending until the player thread has replaced the marks for it
+// version changes with the queue and with the repeat mode, ending is set once the stream
+// holds the last audio of the queue
 static struct {
 	pthread_t           thread;
 	pthread_mutex_t     lock;
 	sem_t               wake;
 	int                 notify;
-	const struct track* queue;
+	struct play_entry*  queue;
 	uint32_t            count;
+	uint32_t            cap;
+	uint32_t            next_id;
+	uint32_t            version;
 	uint32_t            cmd_seq;
 	uint32_t            cmd_index;
+	uint32_t            cmd_id;
 	uint32_t            cmd_ms;
 	bool                cmd_resume;
+	bool                cmd_here;
 	bool                pending;
 	bool                quit;
+	bool                ending;
 	enum play_state     state;
+	enum play_repeat    repeat;
 	struct mark         marks[MARKS];
 	uint32_t            n_marks;
 	uint64_t            flushed;
@@ -56,8 +68,9 @@ static struct {
 	enum phase          phase;
 	uint64_t            written;
 	uint32_t            index;
+	uint32_t            id;
 	bool                open;
-} p = { .lock = PTHREAD_MUTEX_INITIALIZER };
+} p = { .lock = PTHREAD_MUTEX_INITIALIZER, .next_id = 1 };
 
 static void wake(void) {
 	sem_post(&p.wake);
@@ -77,24 +90,50 @@ static uint64_t played(void) {
 	return n < p.flushed ? p.flushed : n;
 }
 
+// lock is held and there is a mark, the one that covers frame at of the stream
+static struct mark* mark_at(uint64_t at) {
+	uint32_t i = p.n_marks - 1;
+
+	while(i && p.marks[i].at > at) {
+		i--;
+	}
+
+	return &p.marks[i];
+}
+
+// lock is held, the place of entry id in the queue, the search starts where the entry was last
+// returns count when the queue has no such entry
+static uint32_t find(uint32_t id, uint32_t hint) {
+	uint32_t i;
+
+	if(hint < p.count && p.queue[hint].id == id) {
+		return hint;
+	}
+
+	for(i = 0; i < p.count && p.queue[i].id != id; i++) {
+	}
+
+	return i;
+}
+
 // lock is held, a pending command shows as if it had been carried out
-static void status_locked(struct play_status* s, uint32_t* index) {
-	const struct mark* m;
+static void status_locked(struct play_status* s) {
+	struct mark* m;
 	uint64_t at;
 	uint64_t ms;
 	uint32_t i;
 
-	*s = (struct play_status){ nullptr, PLAY_STOPPED, 0 };
-	*index = 0;
+	*s = (struct play_status){ .queue = p.queue, .count = p.count, .state = PLAY_STOPPED, .repeat = p.repeat };
 	if(p.pending) {
-		if(p.cmd_index == STOP) {
+		i = p.cmd_index == STOP ? p.count : find(p.cmd_id, p.cmd_index);
+		if(i == p.count) {
 			return;
 		}
 
-		s->track = &p.queue[p.cmd_index];
+		s->track = p.queue[i].track;
 		s->state = p.cmd_resume || p.state == PLAY_STOPPED ? PLAY_PLAYING : p.state;
 		s->position = p.cmd_ms;
-		*index = p.cmd_index;
+		s->index = i;
 		return;
 	}
 
@@ -103,28 +142,77 @@ static void status_locked(struct play_status* s, uint32_t* index) {
 	}
 
 	at = played();
-	i = p.n_marks - 1;
-	while(i && p.marks[i].at > at) {
-		i--;
-	}
-
-	m = &p.marks[i];
+	m = mark_at(at);
+	i = find(m->id, m->index);
+	m->index = i;
 	ms = ((uint64_t)m->base + (at > m->at ? at - m->at : 0)) * 1000 / p.rate;
 	s->track = m->track;
 	s->state = p.state;
 	s->position = m->track->duration && ms > m->track->duration ? m->track->duration : (uint32_t)ms;
-	*index = m->index;
+	s->index = i < p.count ? i : 0;
+}
+
+// lock is held, the id of the entry that plays after entry id, 0 when the queue ends with it
+static uint32_t follower(uint32_t id, uint32_t hint) {
+	uint32_t i = find(id, hint);
+
+	if(i == p.count) {
+		return 0;
+	}
+
+	if(p.repeat == REPEAT_TRACK) {
+		return id;
+	}
+
+	if(i + 1 < p.count) {
+		return p.queue[i + 1].id;
+	}
+
+	return p.repeat == REPEAT_QUEUE ? p.queue[0].id : 0;
+}
+
+// lock is held and there is a mark, the decoder runs up to 2 s ahead of what plays
+// true when every track the stream holds after the playing one still follows the one before it
+static bool in_order(void) {
+	const struct mark* m = mark_at(played());
+	const struct mark* last = &p.marks[p.n_marks - 1];
+
+	for(; m < last; m++) {
+		if(m[1].id != follower(m->id, m->index)) {
+			return false;
+		}
+	}
+
+	return !p.ending || !follower(last->id, last->index);
 }
 
 // lock is held
 static void post(uint32_t index, uint32_t ms, bool resume) {
 	p.pending = true;
 	p.cmd_seq++;
-	p.cmd_index = index;
+	p.cmd_index = index < p.count ? index : STOP;
+	p.cmd_id = index < p.count ? p.queue[index].id : 0;
 	p.cmd_ms = ms;
 	p.cmd_resume = resume;
+	p.cmd_here = false;
 	out_interrupt(true);
 	sem_post(&p.wake);
+}
+
+// lock is held, the queue or the repeat mode has changed
+// when the stream holds audio that no longer follows, the playing track starts over from the frame
+// that plays, which drops that audio and makes the choice of what follows again
+static void replan(void) {
+	struct play_status s;
+
+	p.version++;
+	if(p.pending || p.state == PLAY_STOPPED || !p.n_marks || in_order()) {
+		return;
+	}
+
+	status_locked(&s);
+	post(s.index, s.position, false);
+	p.cmd_here = true;
 }
 
 // lock is held, the command numbered seq is done unless a newer one came in
@@ -148,6 +236,7 @@ static void stop(uint32_t seq, bool command) {
 	out_close();
 	p.state = PLAY_STOPPED;
 	p.n_marks = 0;
+	p.ending = false;
 	if(command) {
 		done(seq);
 	}
@@ -166,7 +255,7 @@ static void push_mark(void) {
 		p.n_marks--;
 	}
 
-	p.marks[p.n_marks++] = (struct mark){ p.track, p.written, p.dec.pos, p.index };
+	p.marks[p.n_marks++] = (struct mark){ p.track, p.written, p.dec.pos, p.id, p.index };
 }
 
 // lock is held, the stream is opened for the decoder and holds nothing but its track
@@ -186,14 +275,23 @@ static bool reopen(void) {
 }
 
 // puts the decoder on the first track from index on that opens, ms into it
-// false when no track is left
-static bool load(uint32_t index, uint32_t ms) {
-	const struct track* t;
+// wrap goes on from the last track to the first, false when no track is left or none opens
+static bool load(uint32_t index, uint32_t ms, bool wrap) {
+	const struct track* t = nullptr;
+	uint32_t tries;
 	int r;
 
-	for(;; index++, ms = 0) {
+	for(tries = 0;; tries++, index++, ms = 0, t = nullptr) {
 		pthread_mutex_lock(&p.lock);
-		t = index < p.count ? &p.queue[index] : nullptr;
+		if(wrap && index >= p.count) {
+			index = 0;
+		}
+
+		if(index < p.count && tries < p.count) {
+			t = p.queue[index].track;
+			p.id = p.queue[index].id;
+		}
+
 		pthread_mutex_unlock(&p.lock);
 		if(!t) {
 			close_decoder();
@@ -224,8 +322,28 @@ static bool load(uint32_t index, uint32_t ms) {
 	}
 }
 
+// lock is held, puts the decoder on the frame that plays next when the playing entry is the one it holds,
+// so that the track goes on unbroken
+// the stream takes its audio once per cycle, the flush that follows comes within the same cycle but for bad luck
+static void catch_up(void) {
+	const struct mark* m;
+	uint64_t at;
+	int64_t frame;
+	int tries;
+
+	for(tries = 0; tries < 3; tries++) {
+		at = played();
+		m = mark_at(at);
+		frame = m->base + (int64_t)(at > m->at ? at - m->at : 0);
+		if(m->id != p.id || frame == p.dec.pos || dec_seek(&p.dec, frame) <= 0) {
+			return;
+		}
+	}
+}
+
 // a command: the stream is kept when it is running in the same format, what it holds is skipped
-static void begin(uint32_t seq, uint32_t index, uint32_t ms, bool resume) {
+// here asks for the playing track to go on from where it is, with ms as the place when the stream is not kept
+static void begin(uint32_t seq, uint32_t index, uint32_t ms, bool resume, bool here) {
 	bool ok = true;
 	bool keep;
 
@@ -241,7 +359,7 @@ static void begin(uint32_t seq, uint32_t index, uint32_t ms, bool resume) {
 		pthread_mutex_unlock(&p.lock);
 	}
 
-	if(!ok || !load(index, ms)) {
+	if(!ok || !load(index, ms, false)) {
 		stop(seq, true);
 		return;
 	}
@@ -249,8 +367,13 @@ static void begin(uint32_t seq, uint32_t index, uint32_t ms, bool resume) {
 	// a paused stream still holds a quantum of the old audio inside pipewire, so it is replaced
 	pthread_mutex_lock(&p.lock);
 	keep = p.phase == DECODING && p.state == PLAY_PLAYING && out_matches(&p.dec.format);
+	p.ending = false;
 	if(resume || p.state == PLAY_STOPPED) {
 		p.state = PLAY_PLAYING;
+	}
+
+	if(keep && here && p.n_marks) {
+		catch_up();
 	}
 
 	if(keep) {
@@ -279,28 +402,50 @@ static void begin(uint32_t seq, uint32_t index, uint32_t ms, bool resume) {
 
 // the track ended by itself, false when the stream gets nothing more for now
 static bool advance(void) {
-	uint32_t next = p.index + 1;
+	uint32_t ended = p.id;
+	uint32_t hint = p.index;
+	uint32_t version;
+	uint32_t next;
+	bool repeat_queue;
 	bool pending;
+	bool loaded;
+	bool settled;
 
-	close_decoder();
-	pthread_mutex_lock(&p.lock);
-	pending = p.pending;
-	pthread_mutex_unlock(&p.lock);
-	if(pending) {
-		return false;
-	}
+	// a file takes a while to open, the choice is made again when the queue or the repeat mode changed meanwhile
+	do {
+		close_decoder();
+		pthread_mutex_lock(&p.lock);
+		pending = p.pending;
+		version = p.version;
+		repeat_queue = p.repeat == REPEAT_QUEUE;
+		next = find(ended, hint);
+		if(next < p.count && p.repeat != REPEAT_TRACK) {
+			next++;
+		}
 
-	if(!load(next, 0)) {
+		pthread_mutex_unlock(&p.lock);
+		if(pending) {
+			return false;
+		}
+
+		loaded = load(next, 0, repeat_queue);
+		pthread_mutex_lock(&p.lock);
+		settled = p.pending || p.version == version;
+		if(settled && loaded) {
+			push_mark();
+		} else if(settled) {
+			p.ending = true;
+		}
+
+		pthread_mutex_unlock(&p.lock);
+	} while(!settled);
+
+	if(!loaded) {
 		out_drain();
 		p.phase = ENDING;
-		return false;
 	}
 
-	pthread_mutex_lock(&p.lock);
-	push_mark();
-	pthread_mutex_unlock(&p.lock);
-
-	return true;
+	return loaded;
 }
 
 static void pump(void) {
@@ -364,6 +509,7 @@ static void* run(void* arg) {
 	uint32_t index;
 	uint32_t ms;
 	bool resume;
+	bool here;
 	bool pending;
 
 	for(;;) {
@@ -375,12 +521,14 @@ static void* run(void* arg) {
 
 		pending = p.pending;
 		seq = p.cmd_seq;
-		index = p.cmd_index;
+		index = p.cmd_index == STOP ? p.count : find(p.cmd_id, p.cmd_index);
+		index = index < p.count ? index : STOP;
 		ms = p.cmd_ms;
 		resume = p.cmd_resume;
+		here = p.cmd_here;
 		pthread_mutex_unlock(&p.lock);
 		if(pending) {
-			begin(seq, index, ms, resume);
+			begin(seq, index, ms, resume, here);
 		} else if(p.phase != IDLE && out_failed()) {
 			stop(0, false);
 		} else if(p.phase == DECODING) {
@@ -423,13 +571,126 @@ void player_fini(void) {
 	sem_post(&p.wake);
 	pthread_join(p.thread, nullptr);
 	out_fini();
+	free(p.queue);
+	p.queue = nullptr;
+	p.count = 0;
+	p.cap = 0;
 }
 
-void player_play(const struct track* queue, uint32_t n, uint32_t start) {
+// lock is held, the n tracks from first on go into the queue at place at, false when there is no memory
+static bool insert(uint32_t at, const struct track* first, uint32_t n) {
+	struct play_entry* q = p.queue;
+	uint32_t cap = p.cap ? p.cap : 256;
+	uint32_t i;
+
+	while(cap - p.count < n) {
+		cap *= 2;
+	}
+
+	if(cap != p.cap) {
+		q = realloc(p.queue, cap * sizeof(*q));
+		if(!q) {
+			report("malloc: %s", strerror(ENOMEM));
+			return false;
+		}
+
+		p.queue = q;
+		p.cap = cap;
+	}
+
+	memmove(&q[at + n], &q[at], (p.count - at) * sizeof(*q));
+	for(i = 0; i < n; i++) {
+		q[at + i] = (struct play_entry){ &first[i], p.next_id++ };
+	}
+
+	p.count += n;
+
+	return true;
+}
+
+void player_start(const struct track* first, uint32_t n) {
 	pthread_mutex_lock(&p.lock);
-	p.queue = queue;
-	p.count = n;
-	post(start, 0, true);
+	if(n && insert(0, first, n)) {
+		p.version++;
+		post(0, 0, true);
+	}
+
+	pthread_mutex_unlock(&p.lock);
+}
+
+void player_add(const struct track* first, uint32_t n) {
+	pthread_mutex_lock(&p.lock);
+	if(insert(p.count, first, n)) {
+		replan();
+	}
+
+	pthread_mutex_unlock(&p.lock);
+	notify();
+}
+
+void player_remove(uint32_t index) {
+	struct play_status s;
+	uint32_t next = STOP;
+
+	pthread_mutex_lock(&p.lock);
+	if(index < p.count) {
+		status_locked(&s);
+		memmove(&p.queue[index], &p.queue[index + 1], (p.count - index - 1) * sizeof(*p.queue));
+		p.count--;
+		if(s.track && s.index == index) {
+			// a paused player stays paused on the entry that takes the place
+			if(index < p.count) {
+				next = index;
+			} else if(p.repeat == REPEAT_QUEUE && p.count) {
+				next = 0;
+			}
+
+			p.version++;
+			post(next, 0, false);
+		} else {
+			replan();
+		}
+	}
+
+	pthread_mutex_unlock(&p.lock);
+	notify();
+}
+
+void player_clear(void) {
+	pthread_mutex_lock(&p.lock);
+	p.count = 0;
+	p.version++;
+	post(STOP, 0, false);
+	pthread_mutex_unlock(&p.lock);
+	notify();
+}
+
+void player_move(uint32_t from, uint32_t to) {
+	struct play_entry e;
+
+	pthread_mutex_lock(&p.lock);
+	if(from < p.count && to < p.count && from != to) {
+		e = p.queue[from];
+		if(from < to) {
+			memmove(&p.queue[from], &p.queue[from + 1], (to - from) * sizeof(e));
+		} else {
+			memmove(&p.queue[to + 1], &p.queue[to], (from - to) * sizeof(e));
+		}
+
+		p.queue[to] = e;
+		replan();
+	}
+
+	pthread_mutex_unlock(&p.lock);
+	notify();
+}
+
+void player_jump(uint32_t index) {
+	pthread_mutex_lock(&p.lock);
+	if(index < p.count) {
+		post(index, 0, true);
+	}
+
 	pthread_mutex_unlock(&p.lock);
 }
 
@@ -455,12 +716,18 @@ void player_toggle(void) {
 
 void player_next(void) {
 	struct play_status s;
-	uint32_t index;
+	uint32_t next = STOP;
 
 	pthread_mutex_lock(&p.lock);
-	status_locked(&s, &index);
+	status_locked(&s);
+	if(s.index + 1 < p.count) {
+		next = s.index + 1;
+	} else if(p.repeat == REPEAT_QUEUE) {
+		next = 0;
+	}
+
 	if(s.track) {
-		post(index + 1 < p.count ? index + 1 : STOP, 0, true);
+		post(next, 0, true);
 	}
 
 	pthread_mutex_unlock(&p.lock);
@@ -468,34 +735,32 @@ void player_next(void) {
 
 void player_prev(void) {
 	struct play_status s;
-	uint32_t index;
 
 	pthread_mutex_lock(&p.lock);
-	status_locked(&s, &index);
+	status_locked(&s);
 	if(s.track) {
-		post(s.position > RESTART_MS || !index ? index : index - 1, 0, true);
+		post(s.position > RESTART_MS || !s.index ? s.index : s.index - 1, 0, true);
 	}
 
 	pthread_mutex_unlock(&p.lock);
 }
 
 // lock is held, a seek keeps a paused track paused and a pending start starting
-static void seek_locked(const struct play_status* s, uint32_t index, uint32_t ms) {
+static void seek_locked(const struct play_status* s, uint32_t ms) {
 	if(s->track->duration && ms > s->track->duration) {
 		ms = s->track->duration;
 	}
 
-	post(index, ms, p.pending && p.cmd_resume);
+	post(s->index, ms, p.pending && p.cmd_resume);
 }
 
 void player_seek_by(int32_t ms) {
 	struct play_status s;
-	uint32_t index;
 
 	pthread_mutex_lock(&p.lock);
-	status_locked(&s, &index);
+	status_locked(&s);
 	if(s.track) {
-		seek_locked(&s, index, ms < 0 && s.position < (uint32_t)-ms ? 0 : s.position + (uint32_t)ms);
+		seek_locked(&s, ms < 0 && s.position < (uint32_t)-ms ? 0 : s.position + (uint32_t)ms);
 	}
 
 	pthread_mutex_unlock(&p.lock);
@@ -503,21 +768,26 @@ void player_seek_by(int32_t ms) {
 
 void player_seek_to(uint32_t ms) {
 	struct play_status s;
-	uint32_t index;
 
 	pthread_mutex_lock(&p.lock);
-	status_locked(&s, &index);
+	status_locked(&s);
 	if(s.track) {
-		seek_locked(&s, index, ms);
+		seek_locked(&s, ms);
 	}
 
 	pthread_mutex_unlock(&p.lock);
 }
 
-void player_status(struct play_status* s) {
-	uint32_t index;
-
+void player_repeat(void) {
 	pthread_mutex_lock(&p.lock);
-	status_locked(s, &index);
+	p.repeat = (enum play_repeat)((p.repeat + 1) % 3);
+	replan();
+	pthread_mutex_unlock(&p.lock);
+	notify();
+}
+
+void player_status(struct play_status* s) {
+	pthread_mutex_lock(&p.lock);
+	status_locked(s);
 	pthread_mutex_unlock(&p.lock);
 }

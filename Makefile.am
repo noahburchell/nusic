@@ -6,7 +6,8 @@ AM_CPPFLAGS = \
 	-include $(top_builddir)/config.h \
 	$(NCURSES_CFLAGS) \
 	$(PIPEWIRE_CFLAGS) \
-	$(FFMPEG_CFLAGS)
+	$(FFMPEG_CFLAGS) \
+	$(SQLITE_CFLAGS)
 
 AM_CFLAGS  = @NUSIC_OPT_CFLAGS@
 AM_LDFLAGS = @NUSIC_OPT_LDFLAGS@
@@ -20,8 +21,11 @@ bin_PROGRAMS = nusic
 
 nusic_SOURCES = \
 	src/nusic.c \
+	src/db.c \
+	src/db.h \
 	src/decode.c \
 	src/decode.h \
+	src/draw.c \
 	src/library.c \
 	src/library.h \
 	src/output.c \
@@ -32,13 +36,18 @@ nusic_SOURCES = \
 	src/report.h \
 	src/ring.c \
 	src/ring.h \
+	src/scan.h \
+	src/screen.h \
+	src/text.c \
+	src/text.h \
 	src/ui.c \
 	src/ui.h
 
 nusic_LDADD = \
 	$(NCURSES_LIBS) \
 	$(PIPEWIRE_LIBS) \
-	$(FFMPEG_LIBS)
+	$(FFMPEG_LIBS) \
+	$(SQLITE_LIBS)
 
 EXTRA_DIST = \
 	README.org \

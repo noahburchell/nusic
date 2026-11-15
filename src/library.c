@@ -1,9 +1,12 @@
 #include "library.h"
 
+#include "db.h"
 #include "report.h"
+#include "scan.h"
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <libavformat/avformat.h>
 #include <limits.h>
 #include <pthread.h>
@@ -27,36 +30,11 @@ struct chunk {
 	char          data[];
 };
 
-struct arena {
-	struct chunk* head;
-};
-
-struct paths {
-	const char** v;
-	uint32_t     n;
-	uint32_t     cap;
-};
-
-struct raw {
-	const char* path;
-	const char* title;
-	const char* artist;
-	const char* album;
-	const char* album_artist;
-	uint32_t    duration;
-	uint16_t    year;
-	uint16_t    album_year;
-	uint16_t    number;
-	uint16_t    disc;
-	bool        ok;
-};
-
 struct scan {
-	const char** paths;
-	struct raw*  raws;
-	uint32_t     total;
-	atomic_uint  next;
-	atomic_uint  done;
+	struct raw* raws;
+	uint32_t    total;
+	atomic_uint next;
+	atomic_uint done;
 };
 
 struct worker {
@@ -122,7 +100,20 @@ static char* arena_alloc(struct arena* a, size_t n) {
 	return p;
 }
 
-static const char* arena_dup(struct arena* a, const char* s, size_t len) {
+static void arena_free(struct arena* a) {
+	struct chunk* c = a->head;
+
+	while(c) {
+		struct chunk* next = c->next;
+
+		free(c);
+		c = next;
+	}
+
+	a->head = nullptr;
+}
+
+const char* arena_dup(struct arena* a, const char* s, size_t len) {
 	char* p = arena_alloc(a, len + 1);
 
 	memcpy(p, s, len);
@@ -148,17 +139,33 @@ static bool is_audio(const char* name) {
 	return false;
 }
 
-static void push(struct paths* ps, struct arena* a, const char* path) {
-	if(ps->n == ps->cap) {
-		ps->cap = ps->cap ? ps->cap * 2 : 1024;
-		ps->v = xrealloc(ps->v, ps->cap * sizeof(*ps->v));
+struct raw* raws_push(struct raws* rs) {
+	struct raw* r;
+
+	if(rs->n == rs->cap) {
+		rs->cap = rs->cap ? rs->cap * 2 : 1024;
+		rs->v = xrealloc(rs->v, rs->cap * sizeof(*rs->v));
 	}
 
-	ps->v[ps->n++] = arena_dup(a, path, strlen(path));
+	r = &rs->v[rs->n++];
+	*r = (struct raw){};
+
+	return r;
+}
+
+// st is null when the size and modification time are of no use
+static void push(struct raws* rs, struct arena* a, const char* path, const struct stat* st) {
+	struct raw* r = raws_push(rs);
+
+	r->path = arena_dup(a, path, strlen(path));
+	if(st) {
+		r->mtime = (int64_t)st->st_mtim.tv_sec * 1000000000 + st->st_mtim.tv_nsec;
+		r->size = st->st_size;
+	}
 }
 
 // the depth limit ends a loop of symlinks
-static void walk(struct paths* ps, struct arena* a, const char* dir, int depth) {
+static void walk(struct raws* rs, struct arena* a, const char* dir, int depth, bool stats) {
 	char path[PATH_MAX];
 	struct dirent* e;
 	struct stat st;
@@ -171,6 +178,7 @@ static void walk(struct paths* ps, struct arena* a, const char* dir, int depth) 
 
 	while((e = readdir(d))) {
 		unsigned type = e->d_type;
+		bool have = false;
 
 		if(e->d_name[0] == '.' || (size_t)snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) >= sizeof(path)) {
 			continue;
@@ -181,6 +189,7 @@ static void walk(struct paths* ps, struct arena* a, const char* dir, int depth) 
 				continue;
 			}
 
+			have = true;
 			type = DT_UNKNOWN;
 			if(S_ISDIR(st.st_mode)) {
 				type = DT_DIR;
@@ -190,38 +199,37 @@ static void walk(struct paths* ps, struct arena* a, const char* dir, int depth) 
 		}
 
 		if(type == DT_DIR && depth < MAX_DEPTH) {
-			walk(ps, a, path, depth + 1);
+			walk(rs, a, path, depth + 1, stats);
 		} else if(type == DT_REG && is_audio(e->d_name)) {
-			push(ps, a, path);
+			if(stats && !have && fstatat(dirfd(d), e->d_name, &st, 0) < 0) {
+				continue;
+			}
+
+			push(rs, a, path, stats ? &st : nullptr);
 		}
 	}
 
 	closedir(d);
 }
 
-static void collect(struct paths* ps, struct arena* a, const char* operand) {
+// the paths are absolute, the database outlives the working directory
+// false when the operand names nothing that can be read, which is reported
+static bool collect(struct raws* rs, struct arena* a, const char* operand, bool stats) {
 	char path[PATH_MAX];
-	size_t len = strlen(operand);
 	struct stat st;
 
-	while(len > 1 && operand[len - 1] == '/') {
-		len--;
+	if(!realpath(operand, path) || stat(path, &st) < 0) {
+		report("open %s: %s", operand, strerror(errno));
+		return false;
 	}
 
-	if(len >= sizeof(path)) {
-		report("%s: path is too long", operand);
-		return;
-	}
-
-	memcpy(path, operand, len);
-	path[len] = 0;
-	if(stat(path, &st) < 0) {
-		report("open %s: %s", path, strerror(errno));
-	} else if(S_ISDIR(st.st_mode)) {
-		walk(ps, a, path, 0);
+	if(S_ISDIR(st.st_mode)) {
+		walk(rs, a, path, 0, stats);
 	} else {
-		push(ps, a, path);
+		push(rs, a, path, stats ? &st : nullptr);
 	}
+
+	return true;
 }
 
 static const char* tag(const AVFormatContext* f, const AVStream* st, const char* key) {
@@ -261,17 +269,19 @@ static int64_t duration_us(const AVFormatContext* f, const AVStream* st) {
 	return f->duration != AV_NOPTS_VALUE && f->duration > 0 ? f->duration : 0;
 }
 
+static const char* keep(struct arena* a, const char* v) {
+	return v ? arena_dup(a, v, strlen(v)) : nullptr;
+}
+
 // the header of the file holds the tags, probing the streams is the slow path taken
 // only when the header names no audio stream or no duration
-static void read_tags(struct raw* t, const char* path, struct arena* a) {
+static void read_tags(struct raw* t, struct arena* a) {
 	AVFormatContext* f = nullptr;
 	const AVStream* st;
-	const char* name = strrchr(path, '/');
-	const char* dot;
 	const char* v;
 	int64_t us;
 
-	if(avformat_open_input(&f, path, nullptr, nullptr) < 0) {
+	if(avformat_open_input(&f, t->path, nullptr, nullptr) < 0) {
 		return;
 	}
 
@@ -294,20 +304,15 @@ static void read_tags(struct raw* t, const char* path, struct arena* a) {
 		return;
 	}
 
-	name = name ? name + 1 : path;
-	dot = strrchr(name, '.');
-	v = tag(f, st, "title");
-	t->title = v ? arena_dup(a, v, strlen(v)) : arena_dup(a, name, dot && dot > name ? (size_t)(dot - name) : strlen(name));
-	v = tag(f, st, "artist");
-	t->artist = v ? arena_dup(a, v, strlen(v)) : unknown_artist;
-	v = tag(f, st, "album");
-	t->album = v ? arena_dup(a, v, strlen(v)) : unknown_album;
+	t->title = keep(a, tag(f, st, "title"));
+	t->artist = keep(a, tag(f, st, "artist"));
+	t->album = keep(a, tag(f, st, "album"));
 	v = tag(f, st, "album_artist");
 	if(!v) {
 		v = tag(f, st, "album artist");
 	}
 
-	t->album_artist = v ? arena_dup(a, v, strlen(v)) : t->artist;
+	t->album_artist = keep(a, v);
 	v = tag(f, st, "date");
 	if(!v) {
 		v = tag(f, st, "year");
@@ -317,7 +322,6 @@ static void read_tags(struct raw* t, const char* path, struct arena* a) {
 	t->number = number(tag(f, st, "track"));
 	t->disc = number(tag(f, st, "disc"));
 	t->duration = (uint32_t)(us / 1000);
-	t->path = path;
 	t->ok = true;
 	avformat_close_input(&f);
 }
@@ -333,8 +337,40 @@ static void* scan_thread(void* arg) {
 			return nullptr;
 		}
 
-		read_tags(&s->raws[i], s->paths[i], &w->arena);
-		atomic_fetch_add(&s->done, 1);
+		if(!s->raws[i].ok) {
+			read_tags(&s->raws[i], &w->arena);
+			atomic_fetch_add(&s->done, 1);
+		}
+	}
+}
+
+// a file without a title is known by its name, an album without an album artist is its artist's
+static void fill(struct raw* r, uint32_t n, struct arena* a) {
+	uint32_t i;
+
+	for(i = 0; i < n; i++) {
+		struct raw* t = &r[i];
+
+		if(!t->title) {
+			const char* name = strrchr(t->path, '/');
+			const char* dot;
+
+			name = name ? name + 1 : t->path;
+			dot = strrchr(name, '.');
+			t->title = arena_dup(a, name, dot && dot > name ? (size_t)(dot - name) : strlen(name));
+		}
+
+		if(!t->artist) {
+			t->artist = unknown_artist;
+		}
+
+		if(!t->album) {
+			t->album = unknown_album;
+		}
+
+		if(!t->album_artist) {
+			t->album_artist = t->artist;
+		}
 	}
 }
 
@@ -391,7 +427,7 @@ static void album_years(struct raw* r, uint32_t n) {
 	}
 }
 
-static void build(struct library* lib, const struct raw* r, uint32_t n) {
+static void group(struct library* lib, const struct raw* r, uint32_t n) {
 	uint32_t albums = 0;
 	uint32_t artists = 0;
 	uint32_t i;
@@ -442,36 +478,27 @@ static void build(struct library* lib, const struct raw* r, uint32_t n) {
 	}
 }
 
-void lib_load(struct library* lib, char** paths, int n, void (*progress)(uint32_t done, uint32_t total)) {
+// reads the tags of the todo files of rs that are not ok, then drops the files that are not audio
+static void read_files(struct raws* rs, struct arena* arena, uint32_t todo, lib_progress* progress) {
 	struct worker workers[MAX_WORKERS];
-	struct arena arena = { nullptr };
-	struct paths ps = { nullptr, 0, 0 };
 	struct scan scan;
 	long cpus = sysconf(_SC_NPROCESSORS_ONLN);
 	uint32_t n_workers = cpus > MAX_WORKERS ? MAX_WORKERS : (uint32_t)cpus;
 	uint32_t good = 0;
 	uint32_t i;
-	int k;
 
-	*lib = (struct library){};
 	if(cpus < 1) {
 		n_workers = 1;
 	}
 
-	for(k = 0; k < n; k++) {
-		collect(&ps, &arena, paths[k]);
+	if(n_workers > todo) {
+		n_workers = todo;
 	}
 
-	scan.paths = ps.v;
-	scan.total = ps.n;
-	scan.raws = xrealloc(nullptr, (ps.n ? ps.n : 1) * sizeof(*scan.raws));
-	memset(scan.raws, 0, ps.n * sizeof(*scan.raws));
+	scan.raws = rs->v;
+	scan.total = rs->n;
 	atomic_init(&scan.next, 0);
 	atomic_init(&scan.done, 0);
-	if(n_workers > ps.n) {
-		n_workers = ps.n;
-	}
-
 	for(i = 0; i < n_workers; i++) {
 		workers[i].scan = &scan;
 		workers[i].arena.head = nullptr;
@@ -482,15 +509,15 @@ void lib_load(struct library* lib, char** paths, int n, void (*progress)(uint32_
 
 	// the calling thread reads too when no worker started
 	n_workers = i;
-	if(!n_workers && ps.n) {
-		struct worker self = { .scan = &scan, .arena = arena };
+	if(!n_workers && todo) {
+		struct worker self = { .scan = &scan, .arena = *arena };
 
 		scan_thread(&self);
-		arena = self.arena;
+		*arena = self.arena;
 	}
 
-	while(progress && n_workers && atomic_load(&scan.done) < scan.total) {
-		progress(atomic_load(&scan.done), scan.total);
+	while(progress && n_workers && atomic_load(&scan.done) < todo) {
+		progress(atomic_load(&scan.done), todo);
 		usleep(50000);
 	}
 
@@ -502,37 +529,177 @@ void lib_load(struct library* lib, char** paths, int n, void (*progress)(uint32_
 		while(c) {
 			struct chunk* next = c->next;
 
-			c->next = arena.head;
-			arena.head = c;
+			c->next = arena->head;
+			arena->head = c;
 			c = next;
 		}
 	}
 
-	for(i = 0; i < ps.n; i++) {
-		if(scan.raws[i].ok) {
-			scan.raws[good++] = scan.raws[i];
+	if(progress && todo) {
+		progress(todo, todo);
+	}
+
+	for(i = 0; i < rs->n; i++) {
+		if(rs->v[i].ok) {
+			rs->v[good++] = rs->v[i];
 		}
 	}
 
-	qsort(scan.raws, good, sizeof(*scan.raws), cmp_raw);
-	album_years(scan.raws, good);
-	qsort(scan.raws, good, sizeof(*scan.raws), cmp_raw);
-	build(lib, scan.raws, good);
-	lib->memory = arena.head;
-	free(scan.raws);
-	free(ps.v);
+	rs->n = good;
+}
+
+// the library takes the arena, rs is freed
+static void finish(struct library* lib, struct raws* rs, struct arena* arena) {
+	fill(rs->v, rs->n, arena);
+	if(rs->n) {
+		qsort(rs->v, rs->n, sizeof(*rs->v), cmp_raw);
+		album_years(rs->v, rs->n);
+		qsort(rs->v, rs->n, sizeof(*rs->v), cmp_raw);
+	}
+
+	group(lib, rs->v, rs->n);
+	lib->memory = arena->head;
+	free(rs->v);
+}
+
+void lib_scan(struct library* lib, char** paths, int n, lib_progress* progress) {
+	struct arena arena = { nullptr };
+	struct raws rs = { nullptr, 0, 0 };
+	int k;
+
+	*lib = (struct library){};
+	for(k = 0; k < n; k++) {
+		collect(&rs, &arena, paths[k], false);
+	}
+
+	read_files(&rs, &arena, rs.n, progress);
+	finish(lib, &rs, &arena);
+}
+
+bool lib_open(struct library* lib, const char* db) {
+	struct arena arena = { nullptr };
+	struct raws rs = { nullptr, 0, 0 };
+	enum db_result res = db_read(db, &rs, &arena, false);
+
+	*lib = (struct library){};
+	if(res == DB_ABSENT) {
+		report("open %s: %s, use --build-db PATH to create it", db, strerror(ENOENT));
+	} else if(res == DB_STALE) {
+		report("%s: made by another version of nusic, use --build-db PATH to replace it", db);
+	} else if(res == DB_OK && !rs.n) {
+		report("%s: no tracks, use --build-db PATH to replace it", db);
+	}
+
+	if(res != DB_OK || !rs.n) {
+		arena_free(&arena);
+		free(rs.v);
+		return false;
+	}
+
+	finish(lib, &rs, &arena);
+
+	return true;
+}
+
+static int cmp_path(const void* a, const void* b) {
+	return strcmp(((const struct raw*)a)->path, ((const struct raw*)b)->path);
+}
+
+// a file that old has with the same size and modification time takes its tags from there
+// a file that two operands reach stays once, returns the number of files taken from old
+static uint32_t reuse(struct raws* found, struct raws* old) {
+	uint32_t kept = 0;
+	uint32_t n = 0;
+	uint32_t k = 0;
+	uint32_t i;
+
+	if(!found->n) {
+		return 0;
+	}
+
+	qsort(found->v, found->n, sizeof(*found->v), cmp_path);
+	if(old->n) {
+		qsort(old->v, old->n, sizeof(*old->v), cmp_path);
+	}
+
+	for(i = 0; i < found->n; i++) {
+		struct raw* r = &found->v[i];
+
+		if(n && !strcmp(found->v[n - 1].path, r->path)) {
+			continue;
+		}
+
+		while(k < old->n && strcmp(old->v[k].path, r->path) < 0) {
+			k++;
+		}
+
+		if(k < old->n && old->v[k].mtime == r->mtime && old->v[k].size == r->size && !strcmp(old->v[k].path, r->path)) {
+			*r = old->v[k];
+			kept++;
+		}
+
+		found->v[n++] = *r;
+	}
+
+	found->n = n;
+
+	return kept;
+}
+
+static void no_audio(char** paths, int n) {
+	report("no audio files in %s%s", paths[0], n > 1 ? " and the other paths" : "");
+}
+
+bool lib_build_db(const char* db, char** paths, int n, lib_progress* progress, struct lib_build* out) {
+	struct arena arena = { nullptr };
+	struct raws rs = { nullptr, 0, 0 };
+	struct raws old = { nullptr, 0, 0 };
+	uint32_t kept;
+	bool ok = true;
+	int k;
+
+	*out = (struct lib_build){};
+	for(k = 0; k < n; k++) {
+		if(!collect(&rs, &arena, paths[k], true)) {
+			ok = false;
+		}
+	}
+
+	// an operand that is mistyped or holds no audio would empty the database, so it stays as it is
+	if(ok && !rs.n) {
+		no_audio(paths, n);
+		ok = false;
+	}
+
+	if(ok) {
+		if(db_read(db, &old, &arena, true) != DB_OK) {
+			old.n = 0;
+		}
+
+		kept = reuse(&rs, &old);
+		out->read = rs.n - kept;
+		out->kept = kept;
+		read_files(&rs, &arena, rs.n - kept, progress);
+		out->tracks = rs.n;
+		if(rs.n) {
+			ok = db_write(db, rs.v, rs.n);
+		} else {
+			no_audio(paths, n);
+			ok = false;
+		}
+	}
+
+	arena_free(&arena);
+	free(rs.v);
+	free(old.v);
+
+	return ok;
 }
 
 void lib_free(struct library* lib) {
-	struct chunk* c = lib->memory;
+	struct arena arena = { lib->memory };
 
-	while(c) {
-		struct chunk* next = c->next;
-
-		free(c);
-		c = next;
-	}
-
+	arena_free(&arena);
 	free(lib->tracks);
 	free(lib->albums);
 	free(lib->artists);

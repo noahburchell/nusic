@@ -9,9 +9,13 @@
 #include <spa/utils/result.h>
 #include <string.h>
 
-// the ring holds at least this much audio, the decoder refills it at half
+// the ring holds about this much audio, the decoder refills it at half
+// an eighth of it stays free: after a flush the stream has yet to skip what the ring holds,
+// and the audio that follows has to be in the ring before the stream asks for it
 #define RING_SECONDS 2
 #define RING_MAX     (16u << 20)
+#define RESERVE_DIV  8
+#define URGENT_DIV   4
 
 typedef void wake_fn(void);
 
@@ -28,6 +32,8 @@ static struct {
 	struct spa_audio_info_raw format;
 	struct ring               ring;
 	uint32_t                  stride;
+	uint32_t                  reserve;
+	uint32_t                  urgent;
 	atomic_ullong             played;
 	atomic_bool               draining;
 	atomic_bool               drained;
@@ -255,6 +261,8 @@ static bool open_stream(const struct spa_audio_info_raw* fmt, uint32_t stride) {
 
 	out.format = *fmt;
 	out.stride = stride;
+	out.reserve = out.ring.size / RESERVE_DIV / stride * stride;
+	out.urgent = 0;
 	out.drain_sent = false;
 	atomic_store(&out.played, 0);
 	atomic_store(&out.draining, false);
@@ -306,6 +314,18 @@ bool out_matches(const struct spa_audio_info_raw* fmt) {
 	       && !memcmp(fmt->position, out.format.position, fmt->channels * sizeof(*fmt->position));
 }
 
+// the frames that may be written now, urgent bytes of them may come out of the reserve
+static uint32_t writable(uint8_t** dst) {
+	uint32_t room = ring_writable(&out.ring, dst);
+	uint32_t open = room > out.reserve ? room - out.reserve : 0;
+
+	if(open < out.urgent) {
+		open = room < out.urgent ? room : out.urgent;
+	}
+
+	return open / out.stride;
+}
+
 uint32_t out_wait(uint8_t** dst) {
 	uint32_t room;
 
@@ -313,7 +333,7 @@ uint32_t out_wait(uint8_t** dst) {
 		return 0;
 	}
 
-	room = ring_writable(&out.ring, dst) / out.stride;
+	room = writable(dst);
 	if(room) {
 		return room;
 	}
@@ -322,16 +342,20 @@ uint32_t out_wait(uint8_t** dst) {
 		return 0;
 	}
 
-	return ring_writable(&out.ring, dst) / out.stride;
+	return writable(dst);
 }
 
 void out_commit(uint32_t frames) {
-	ring_commit(&out.ring, frames * out.stride);
+	uint32_t bytes = frames * out.stride;
+
+	ring_commit(&out.ring, bytes);
+	out.urgent = bytes < out.urgent ? out.urgent - bytes : 0;
 }
 
 // pipewire holds up to a quantum of its own, that goes too
 void out_flush(void) {
 	ring_flush(&out.ring);
+	out.urgent = out.reserve / URGENT_DIV / out.stride * out.stride;
 	pw_thread_loop_lock(out.loop);
 	pw_stream_flush(out.stream, false);
 	pw_thread_loop_unlock(out.loop);
