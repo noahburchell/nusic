@@ -22,10 +22,18 @@ nusic_SOURCES = \
 	src/nusic.c \
 	src/decode.c \
 	src/decode.h \
+	src/library.c \
+	src/library.h \
 	src/output.c \
 	src/output.h \
+	src/player.c \
+	src/player.h \
+	src/report.c \
+	src/report.h \
 	src/ring.c \
-	src/ring.h
+	src/ring.h \
+	src/ui.c \
+	src/ui.h
 
 nusic_LDADD = \
 	$(NCURSES_LIBS) \

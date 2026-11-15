@@ -1,12 +1,19 @@
 #include "ring.h"
 
+#include "report.h"
+
 #include <errno.h>
-#include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
-bool ring_init(struct ring* g, uint32_t min) {
+void ring_init(struct ring* g) {
+	sem_init(&g->sem, 0, 0);
+	g->base = nullptr;
+	atomic_store(&g->waiting, false);
+}
+
+bool ring_map(struct ring* g, uint32_t min) {
 	uint32_t page = (uint32_t)sysconf(_SC_PAGESIZE);
 	uint32_t size = min > page ? min : page;
 	const char* call = "memfd_create";
@@ -34,20 +41,19 @@ bool ring_init(struct ring* g, uint32_t min) {
 	}
 
 	close(fd);
-	sem_init(&g->sem, 0, 0);
 	g->base = base;
 	g->size = size;
 	g->mask = size - 1;
 	atomic_store(&g->w, 0);
 	atomic_store(&g->r, 0);
 	atomic_store(&g->wake_at, 0);
-	atomic_store(&g->waiting, false);
-	atomic_store(&g->aborted, false);
+	atomic_store(&g->flush_to, 0);
+	atomic_store(&g->flush, false);
 
 	return true;
 
 fail:
-	fprintf(stderr, "nusic: %s: %s\n", call, strerror(errno));
+	report("%s: %s", call, strerror(errno));
 	if(base != MAP_FAILED) {
 		munmap(base, (size_t)size * 2);
 	}
@@ -59,19 +65,18 @@ fail:
 	return false;
 }
 
-void ring_destroy(struct ring* g) {
+void ring_unmap(struct ring* g) {
 	munmap(g->base, (size_t)g->size * 2);
-	sem_destroy(&g->sem);
 	g->base = nullptr;
 }
 
-bool ring_wait(struct ring* g, uint32_t bytes) {
+bool ring_wait(struct ring* g, uint32_t bytes, atomic_bool* stop) {
 	uint32_t target = atomic_load_explicit(&g->w, memory_order_relaxed) + bytes - g->size;
 
 	atomic_store(&g->wake_at, target);
 	for(;;) {
 		atomic_store(&g->waiting, true);
-		if(atomic_load(&g->aborted)) {
+		if(atomic_load(stop)) {
 			atomic_store(&g->waiting, false);
 			return false;
 		}
@@ -86,8 +91,7 @@ bool ring_wait(struct ring* g, uint32_t bytes) {
 	}
 }
 
-void ring_abort(struct ring* g) {
-	atomic_store(&g->aborted, true);
+void ring_wake(struct ring* g) {
 	if(atomic_exchange(&g->waiting, false)) {
 		sem_post(&g->sem);
 	}

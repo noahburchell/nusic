@@ -1,20 +1,52 @@
-#include "decode.h"
-#include "output.h"
+#include "library.h"
+#include "player.h"
+#include "ui.h"
 
 #include <curses.h>
+#include <errno.h>
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
+#include <libswresample/swresample.h>
+#include <locale.h>
 #include <pipewire/pipewire.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 static void usage(void) {
-	printf("usage: nusic [OPTION]... FILE...\n"
+	printf("usage: nusic [OPTION]... [PATH]...\n"
 	       "\n"
 	       "      --help    display this help and exit\n"
 	       "      --version display the nusic and library versions and exit\n"
 	       "\n"
-	       "FILE is an audio file in any format ffmpeg decodes\n"
-	       "the files play in order through pipewire\n");
+	       "keys:\n"
+	       "  up, C-p         move up\n"
+	       "  down, C-n       move down\n"
+	       "  right, C-f      go to the tracks of the artist\n"
+	       "  left, C-b       go back to the artists\n"
+	       "  tab             switch between artists and tracks\n"
+	       "  enter           open the artist, play the track or the album\n"
+	       "  pgdn, C-v       move down a page\n"
+	       "  pgup, M-v       move up a page\n"
+	       "  home, M-<       move to the first row\n"
+	       "  end, M->        move to the last row\n"
+	       "  space           pause or resume\n"
+	       "  <, >            previous track, next track\n"
+	       "  ,  .            seek back 5 s, seek forward 5 s\n"
+	       "  C-l             redraw the screen\n"
+	       "  q, C-c          quit\n"
+	       "\n"
+	       "mouse:\n"
+	       "  click           select a row, press a button of the play bar\n"
+	       "  double click    play the track or the album\n"
+	       "  wheel           scroll the list under the pointer\n"
+	       "  progress bar    click to seek\n"
+	       "\n"
+	       "PATH is an audio file or a directory searched for audio files\n"
+	       "PATH defaults to ~/Music\n");
 }
 
 static void try_help(void) {
@@ -33,49 +65,27 @@ static void version(void) {
 	av_line("libavutil", avutil_version());
 }
 
-static bool play(const char* path) {
-	struct decoder d;
-	uint8_t* dst;
-	uint32_t room;
-	bool ok;
-
-	if(!dec_open(&d, path)) {
-		return false;
-	}
-
-	printf("%s: %s, %u Hz, %u %s, %s\n", path, avcodec_get_name(d.codec->codec_id), d.format.rate, d.format.channels,
-	       d.format.channels == 1 ? "channel" : "channels", av_get_sample_fmt_name(d.out_fmt));
-	do {
-		if(!out_set_format(&d.format, d.stride)) {
-			break;
-		}
-
-		room = out_wait(&dst);
-		if(!room) {
-			break;
-		}
-
-		out_commit(dec_read(&d, dst, room));
-	} while(dec_next(&d));
-
-	ok = !d.failed;
-	dec_close(&d);
-
-	return ok;
+static void progress(uint32_t done, uint32_t total) {
+	fprintf(stderr, "\rnusic: reading tags, %u of %u files", done, total);
 }
 
 int main(int argc, char** argv) {
-	char** files = argv + 1;
+	char home_music[4096];
+	char* fallback[] = { home_music };
+	char** paths = argv + 1;
+	struct library lib;
+	const char* home = getenv("HOME");
 	bool options = true;
-	int status = 0;
+	bool tty = isatty(2);
 	int n = 0;
+	int notify;
 	int k;
 
 	for(k = 1; k < argc; k++) {
 		const char* a = argv[k];
 
 		if(!options || a[0] != '-' || !a[1]) {
-			files[n++] = argv[k];
+			paths[n++] = argv[k];
 		} else if(!strcmp(a, "--")) {
 			options = false;
 		} else if(!strcmp(a, "--help")) {
@@ -91,31 +101,51 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	if(!n) {
-		fprintf(stderr, "nusic: missing file operand\n");
-		try_help();
-		return 2;
-	}
-
-	setvbuf(stdout, nullptr, _IOLBF, 0);
-	av_log_set_level(AV_LOG_QUIET);
-	if(!out_init()) {
-		out_fini();
+	if(!isatty(0) || !isatty(1)) {
+		fprintf(stderr, "nusic: standard input and standard output must be a terminal\n");
 		return 1;
 	}
 
-	for(k = 0; k < n && !out_failed(); k++) {
-		if(!play(files[k])) {
-			status = 1;
+	if(!n) {
+		if(!home || (size_t)snprintf(home_music, sizeof(home_music), "%s/Music", home) >= sizeof(home_music)) {
+			fprintf(stderr, "nusic: HOME is not set, no default PATH\n");
+			try_help();
+			return 2;
 		}
+
+		paths = fallback;
+		n = 1;
 	}
 
-	out_drain();
-	if(out_failed()) {
-		status = 1;
+	setlocale(LC_ALL, "");
+	av_log_set_level(AV_LOG_QUIET);
+	lib_load(&lib, paths, n, tty ? progress : nullptr);
+	if(tty) {
+		fprintf(stderr, "\r\033[K");
 	}
 
-	out_fini();
+	if(!lib.n_tracks) {
+		fprintf(stderr, "nusic: no audio files in %s%s\n", paths[0], n > 1 ? " and the other paths" : "");
+		lib_free(&lib);
+		return 1;
+	}
 
-	return status;
+	notify = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	if(notify < 0) {
+		fprintf(stderr, "nusic: eventfd: %s\n", strerror(errno));
+		lib_free(&lib);
+		return 1;
+	}
+
+	if(!player_init(notify)) {
+		lib_free(&lib);
+		return 1;
+	}
+
+	ui_run(&lib, notify);
+	player_fini();
+	lib_free(&lib);
+	close(notify);
+
+	return 0;
 }

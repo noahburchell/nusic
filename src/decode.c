@@ -1,6 +1,7 @@
 #include "decode.h"
 
-#include <stdio.h>
+#include "report.h"
+
 #include <string.h>
 
 #define MAX_ERRORS 64
@@ -44,7 +45,7 @@ static const uint8_t spa_channel[] = {
 };
 
 static void diag(const struct decoder* d, const char* verb, int err) {
-	fprintf(stderr, "nusic: %s %s: %s\n", verb, d->path, av_err2str(err));
+	report("%s %s: %s", verb, d->path, av_err2str(err));
 }
 
 // a damaged packet costs its own samples, the rest of the file still plays
@@ -54,7 +55,7 @@ static void warn(struct decoder* d, int err) {
 	}
 
 	d->warned = true;
-	fprintf(stderr, "nusic: warning: decode %s: %s\n", d->path, av_err2str(err));
+	report("warning: decode %s: %s", d->path, av_err2str(err));
 }
 
 // a layout without channel names gets the default one for its channel count
@@ -97,17 +98,17 @@ static bool configure(struct decoder* d) {
 	}
 
 	if((unsigned)out >= sizeof(spa_format) / sizeof(*spa_format) || !spa_format[out]) {
-		fprintf(stderr, "nusic: %s: unsupported sample format\n", d->path);
+		report("%s: unsupported sample format", d->path);
 		return false;
 	}
 
 	if(ch < 1 || ch > (int)SPA_AUDIO_MAX_CHANNELS) {
-		fprintf(stderr, "nusic: %s: has %d channels, the maximum is %u\n", d->path, ch, SPA_AUDIO_MAX_CHANNELS);
+		report("%s: has %d channels, the maximum is %u", d->path, ch, SPA_AUDIO_MAX_CHANNELS);
 		return false;
 	}
 
 	if(f->sample_rate < 1) {
-		fprintf(stderr, "nusic: %s: invalid sample rate %d Hz\n", d->path, f->sample_rate);
+		report("%s: invalid sample rate %d Hz", d->path, f->sample_rate);
 		return false;
 	}
 
@@ -146,20 +147,45 @@ static bool configure(struct decoder* d) {
 	return true;
 }
 
-static bool accept(struct decoder* d) {
+// 1 when the frame is current, 0 when it lies before a seek target, -1 when it cannot be played
+static int accept(struct decoder* d) {
 	const AVFrame* f = d->frame;
+	const AVStream* st = d->demux->streams[d->stream];
+	int64_t at = d->skip_to;
 
 	if(f->format != d->in_fmt || f->sample_rate != d->in_rate || av_channel_layout_compare(&f->ch_layout, &d->in_layout)) {
 		if(!configure(d)) {
 			d->failed = true;
-			return false;
+			return -1;
 		}
 	}
 
 	d->left = (uint32_t)f->nb_samples;
 	d->errors = 0;
+	if(d->skip_to < 0) {
+		return 1;
+	}
 
-	return true;
+	// a seek lands on the packet before the target, the frames ahead of it are cut
+	if(f->pts != AV_NOPTS_VALUE) {
+		at = av_rescale_q(f->pts - (st->start_time != AV_NOPTS_VALUE ? st->start_time : 0), st->time_base,
+		                  (AVRational){ 1, f->sample_rate });
+	}
+
+	if(at < d->skip_to) {
+		if(d->skip_to - at >= f->nb_samples) {
+			d->left = 0;
+			return 0;
+		}
+
+		d->left -= (uint32_t)(d->skip_to - at);
+		at = d->skip_to;
+	}
+
+	d->pos = at;
+	d->skip_to = -1;
+
+	return 1;
 }
 
 bool dec_next(struct decoder* d) {
@@ -176,7 +202,13 @@ bool dec_next(struct decoder* d) {
 				continue;
 			}
 
-			return accept(d);
+			r = accept(d);
+			if(!r) {
+				av_frame_unref(d->frame);
+				continue;
+			}
+
+			return r > 0;
 		}
 
 		if(r == AVERROR_EOF) {
@@ -247,6 +279,7 @@ uint32_t dec_read(struct decoder* d, uint8_t* dst, uint32_t max) {
 	}
 
 	d->left -= n;
+	d->pos += n;
 	if(!d->left) {
 		av_frame_unref(d->frame);
 	}
@@ -254,12 +287,37 @@ uint32_t dec_read(struct decoder* d, uint8_t* dst, uint32_t max) {
 	return n;
 }
 
+int dec_seek(struct decoder* d, int64_t pos) {
+	const AVStream* st = d->demux->streams[d->stream];
+	int64_t ts = av_rescale_q(pos, (AVRational){ 1, d->in_rate }, st->time_base);
+	int r;
+
+	if(st->start_time != AV_NOPTS_VALUE) {
+		ts += st->start_time;
+	}
+
+	r = av_seek_frame(d->demux, d->stream, ts, AVSEEK_FLAG_BACKWARD);
+	if(r < 0) {
+		diag(d, "seek", r);
+		return -1;
+	}
+
+	avcodec_flush_buffers(d->codec);
+	av_frame_unref(d->frame);
+	d->left = 0;
+	d->flushing = false;
+	d->skip_to = pos;
+	d->pos = pos;
+
+	return dec_next(d);
+}
+
 bool dec_open(struct decoder* d, const char* path) {
 	const AVCodec* codec;
 	unsigned i;
 	int r;
 
-	*d = (struct decoder){ .path = path, .in_fmt = AV_SAMPLE_FMT_NONE };
+	*d = (struct decoder){ .path = path, .in_fmt = AV_SAMPLE_FMT_NONE, .skip_to = -1 };
 	r = avformat_open_input(&d->demux, path, nullptr, nullptr);
 	if(r < 0) {
 		diag(d, "open", r);
@@ -274,7 +332,7 @@ bool dec_open(struct decoder* d, const char* path) {
 
 	r = av_find_best_stream(d->demux, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
 	if(r < 0) {
-		fprintf(stderr, "nusic: %s: %s\n", path, r == AVERROR_DECODER_NOT_FOUND ? "no decoder for the audio stream" : "no audio stream");
+		report("%s: %s", path, r == AVERROR_DECODER_NOT_FOUND ? "no decoder for the audio stream" : "no audio stream");
 		goto fail;
 	}
 
@@ -311,7 +369,7 @@ bool dec_open(struct decoder* d, const char* path) {
 	}
 
 	if(!d->failed) {
-		fprintf(stderr, "nusic: %s: no audio data\n", path);
+		report("%s: no audio data", path);
 	}
 
 fail:
