@@ -1,17 +1,20 @@
+#include "decode.h"
+#include "output.h"
+
 #include <curses.h>
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
-#include <libswresample/swresample.h>
 #include <pipewire/pipewire.h>
 #include <stdio.h>
 #include <string.h>
 
 static void usage(void) {
-	printf("usage: nusic [OPTION]...\n"
+	printf("usage: nusic [OPTION]... FILE...\n"
 	       "\n"
 	       "      --help    display this help and exit\n"
-	       "      --version display the nusic and library versions and exit\n");
+	       "      --version display the nusic and library versions and exit\n"
+	       "\n"
+	       "FILE is an audio file in any format ffmpeg decodes\n"
+	       "the files play in order through pipewire\n");
 }
 
 static void try_help(void) {
@@ -30,31 +33,89 @@ static void version(void) {
 	av_line("libavutil", avutil_version());
 }
 
+static bool play(const char* path) {
+	struct decoder d;
+	uint8_t* dst;
+	uint32_t room;
+	bool ok;
+
+	if(!dec_open(&d, path)) {
+		return false;
+	}
+
+	printf("%s: %s, %u Hz, %u %s, %s\n", path, avcodec_get_name(d.codec->codec_id), d.format.rate, d.format.channels,
+	       d.format.channels == 1 ? "channel" : "channels", av_get_sample_fmt_name(d.out_fmt));
+	do {
+		if(!out_set_format(&d.format, d.stride)) {
+			break;
+		}
+
+		room = out_wait(&dst);
+		if(!room) {
+			break;
+		}
+
+		out_commit(dec_read(&d, dst, room));
+	} while(dec_next(&d));
+
+	ok = !d.failed;
+	dec_close(&d);
+
+	return ok;
+}
+
 int main(int argc, char** argv) {
-	const char* a;
+	char** files = argv + 1;
+	bool options = true;
+	int status = 0;
+	int n = 0;
+	int k;
 
-	if(argc < 2) {
-		return 0;
+	for(k = 1; k < argc; k++) {
+		const char* a = argv[k];
+
+		if(!options || a[0] != '-' || !a[1]) {
+			files[n++] = argv[k];
+		} else if(!strcmp(a, "--")) {
+			options = false;
+		} else if(!strcmp(a, "--help")) {
+			usage();
+			return 0;
+		} else if(!strcmp(a, "--version")) {
+			version();
+			return 0;
+		} else {
+			fprintf(stderr, "nusic: unknown option '%s'\n", a);
+			try_help();
+			return 2;
+		}
 	}
 
-	a = argv[1];
-	if(!strcmp(a, "--help")) {
-		usage();
-		return 0;
+	if(!n) {
+		fprintf(stderr, "nusic: missing file operand\n");
+		try_help();
+		return 2;
 	}
 
-	if(!strcmp(a, "--version")) {
-		version();
-		return 0;
+	setvbuf(stdout, nullptr, _IOLBF, 0);
+	av_log_set_level(AV_LOG_QUIET);
+	if(!out_init()) {
+		out_fini();
+		return 1;
 	}
 
-	if(a[0] == '-' && a[1]) {
-		fprintf(stderr, "nusic: unknown option '%s'\n", a);
-	} else {
-		fprintf(stderr, "nusic: unexpected operand '%s'\n", a);
+	for(k = 0; k < n && !out_failed(); k++) {
+		if(!play(files[k])) {
+			status = 1;
+		}
 	}
 
-	try_help();
+	out_drain();
+	if(out_failed()) {
+		status = 1;
+	}
 
-	return 2;
+	out_fini();
+
+	return status;
 }

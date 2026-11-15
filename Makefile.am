@@ -19,7 +19,13 @@ LINK = $(CCLD) $(AM_CFLAGS) $(CFLAGS) $(NUSIC_CFLAGS) $(AM_LDFLAGS) $(LDFLAGS) $
 bin_PROGRAMS = nusic
 
 nusic_SOURCES = \
-	src/nusic.c
+	src/nusic.c \
+	src/decode.c \
+	src/decode.h \
+	src/output.c \
+	src/output.h \
+	src/ring.c \
+	src/ring.h
 
 nusic_LDADD = \
 	$(NCURSES_LIBS) \
@@ -28,4 +34,5 @@ nusic_LDADD = \
 
 EXTRA_DIST = \
 	README.org \
+	LICENSE \
 	autogen.sh
