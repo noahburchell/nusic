@@ -1,0 +1,13 @@
+* nusic
+
+this time, the n was not just my initial but also ncurses
+
+** contact
+[[mailto:nusic@nburch.org][nusic@nburch.org]]
+
+** credit
+assisted by fable 5.2
+
+** license
+gpl3
+
