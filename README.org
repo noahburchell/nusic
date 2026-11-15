@@ -2,6 +2,52 @@
 
 this time, the n was not just my initial but also ncurses
 
+*** moving
+| up, C-p    | move up                               |
+| down, C-n  | move down                             |
+| pgup, M-v  | move up a page                        |
+| pgdn, C-v  | move down a page                      |
+| home, M-<  | move to the first row                 |
+| end, M->   | move to the last row                  |
+| right, C-f | go to the pane on the right           |
+| left, C-b  | go to the pane on the left            |
+| tab        | go to the next pane, wraps around     |
+| S-tab      | go to the previous pane, wraps around |
+
+*** album artists and albums
+| enter on an artist | go to its albums                                               |
+| enter on an album  | put the album on top of the queue and play it                  |
+| enter on a track   | put the track on top of the queue and play it                  |
+| a                  | add the artist, the album or the track to the end of the queue |
+
+*** queue
+| enter               | play the queue entry      |
+| M-p, M-up, C-up     | move the queue entry up   |
+| M-n, M-down, C-down | move the queue entry down |
+| del, C-k            | remove the queue entry    |
+| M-k                 | clear the queue and stop  |
+
+*** playback
+| space | pause or resume, start the queue at its selected entry when nothing plays |
+| <     | previous track, restart the track when it is more than 3 s in             |
+| >     | next track                                                                |
+| ,     | seek back 5 s                                                             |
+| .     | seek forward 5 s                                                          |
+| r     | repeat the queue, then the track, then nothing                            |
+
+*** other
+| C-l    | redraw the screen |
+| q, C-c | quit              |
+
+** mouse
+| click on a row            | select the row                                          |
+| click on a pane title     | go to the pane                                          |
+| double click              | the same as enter on an album, a track or a queue entry |
+| right click               | the same as a                                           |
+| wheel                     | scroll the list under the pointer                       |
+| click on the play bar     | previous track, pause or resume, next track, repeat     |
+| click on the progress bar | seek to that place                                      |
+
 ** contact
 [[mailto:nusic@nburch.org][nusic@nburch.org]]
 
@@ -9,5 +55,5 @@ this time, the n was not just my initial but also ncurses
 assisted by fable 5.2
 
 ** license
-gpl3
+gplv3 <3
 
