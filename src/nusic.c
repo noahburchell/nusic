@@ -4,6 +4,7 @@
 #include "ui.h"
 
 #include <curses.h>
+#include <dbus/dbus.h>
 #include <errno.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -59,6 +60,8 @@ static void usage(void) {
 	       "the panes are the album artists, the albums of the selected artist and the queue\n"
 	       "a terminal under 120 columns shows the albums and the queue one at a time\n"
 	       "\n"
+	       "other programs read what plays and control it through the mpris interface of the session bus\n"
+	       "\n"
 	       "PATH is an audio file or a directory searched for audio files\n"
 	       "without PATH the library is the database, with PATH it is the files under PATH\n"
 	       "--build-db replaces what the database held, a file that has not changed is not read again\n"
@@ -74,7 +77,12 @@ static void av_line(const char* name, unsigned v) {
 }
 
 static void version(void) {
-	printf("nusic %s\n%s\npipewire %s\nsqlite %s\n", PACKAGE_VERSION, curses_version(), pw_get_library_version(), sqlite3_libversion());
+	int major;
+	int minor;
+	int micro;
+
+	dbus_get_version(&major, &minor, &micro);
+	printf("nusic %s\n%s\npipewire %s\nsqlite %s\ndbus %d.%d.%d\n", PACKAGE_VERSION, curses_version(), pw_get_library_version(), sqlite3_libversion(), major, minor, micro);
 	av_line("libavformat", avformat_version());
 	av_line("libavcodec", avcodec_version());
 	av_line("libswresample", swresample_version());

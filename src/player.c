@@ -786,6 +786,17 @@ void player_repeat(void) {
 	notify();
 }
 
+void player_set_repeat(enum play_repeat repeat) {
+	pthread_mutex_lock(&p.lock);
+	if(p.repeat != repeat) {
+		p.repeat = repeat;
+		replan();
+	}
+
+	pthread_mutex_unlock(&p.lock);
+	notify();
+}
+
 void player_status(struct play_status* s) {
 	pthread_mutex_lock(&p.lock);
 	status_locked(s);

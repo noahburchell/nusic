@@ -7,7 +7,8 @@ AM_CPPFLAGS = \
 	$(NCURSES_CFLAGS) \
 	$(PIPEWIRE_CFLAGS) \
 	$(FFMPEG_CFLAGS) \
-	$(SQLITE_CFLAGS)
+	$(SQLITE_CFLAGS) \
+	$(DBUS_CFLAGS)
 
 AM_CFLAGS  = @NUSIC_OPT_CFLAGS@
 AM_LDFLAGS = @NUSIC_OPT_LDFLAGS@
@@ -28,6 +29,8 @@ nusic_SOURCES = \
 	src/draw.c \
 	src/library.c \
 	src/library.h \
+	src/mpris.c \
+	src/mpris.h \
 	src/output.c \
 	src/output.h \
 	src/player.c \
@@ -47,7 +50,8 @@ nusic_LDADD = \
 	$(NCURSES_LIBS) \
 	$(PIPEWIRE_LIBS) \
 	$(FFMPEG_LIBS) \
-	$(SQLITE_LIBS)
+	$(SQLITE_LIBS) \
+	$(DBUS_LIBS)
 
 EXTRA_DIST = \
 	README.org \

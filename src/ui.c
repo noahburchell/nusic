@@ -1,5 +1,6 @@
 #include "ui.h"
 
+#include "mpris.h"
 #include "player.h"
 #include "report.h"
 #include "screen.h"
@@ -606,7 +607,7 @@ static bool update_status(void) {
 }
 
 void ui_run(const struct library* lib, int notify) {
-	struct pollfd fds[2] = { { 0, POLLIN, 0 }, { notify, POLLIN, 0 } };
+	struct pollfd fds[3] = { { 0, POLLIN, 0 }, { notify, POLLIN, 0 }, { -1, POLLIN, 0 } };
 	uint64_t count;
 	bool dirty = true;
 	int saved;
@@ -638,12 +639,15 @@ void ui_run(const struct library* lib, int notify) {
 
 	saved = hide_stderr();
 	report_sink(on_report);
+	mpris_init(lib);
 	layout();
 	build_page();
 	while(!ui.quit) {
 		if(update_status()) {
 			dirty = true;
 		}
+
+		mpris_update(&ui.s);
 
 		if(dirty) {
 			take_message();
@@ -654,9 +658,14 @@ void ui_run(const struct library* lib, int notify) {
 
 		refresh();
 		dirty = false;
-		poll(fds, 2, timeout_ms(&ui.s));
+		fds[2].fd = mpris_fd();
+		poll(fds, 3, timeout_ms(&ui.s));
 		if(read(notify, &count, sizeof(count)) > 0) {
 			dirty = true;
+		}
+
+		if(mpris_dispatch()) {
+			ui.quit = true;
 		}
 
 		while((ch = getch()) != ERR) {
@@ -665,6 +674,7 @@ void ui_run(const struct library* lib, int notify) {
 		}
 	}
 
+	mpris_fini();
 	report_sink(nullptr);
 	endwin();
 	if(saved >= 0) {

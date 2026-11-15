@@ -58,4 +58,5 @@ void player_seek_to(uint32_t ms);
 // off, then the queue starts over when it ends, then the track plays again when it ends, then off
 // next goes from the last track to the first while the queue repeats
 void player_repeat(void);
+void player_set_repeat(enum play_repeat repeat);
 void player_status(struct play_status* s);
