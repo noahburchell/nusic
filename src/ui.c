@@ -315,32 +315,16 @@ static enum control control_at(int x, int y) {
 	return y == ui.h - 2 ? CTL_SPEED : CTL_NONE;
 }
 
-// the value at slider column col on the scale from min to max, a multiple of step above min
-// the column that shows unity gives unity, the scale may step over it otherwise
-static int knob_value(int col, int min, int max, int step, int unity) {
-	int v;
-
-	if(col == knob_at(unity, min, max)) {
-		return unity;
-	}
-
-	v = (col * (max - min) + (ui.knob_w - 1) / 2) / (ui.knob_w - 1);
-
-	return min + (v + step / 2) / step * step;
-}
-
+// a slider has fewer columns than values, so a click moves one step towards the pointer and no further
 static void click_control(enum control c, int x) {
 	int col = x - ui.knob_x;
+	int at = c == CTL_GAIN ? knob_at(ui.s.gain, GAIN_MIN, GAIN_MAX) : knob_at(ui.s.speed, SPEED_MIN, SPEED_MAX);
 
-	if(!ui.knob_w || col < 0 || col >= ui.knob_w) {
+	if(!ui.knob_w || col < 0 || col >= ui.knob_w || col == at) {
 		return;
 	}
 
-	if(c == CTL_GAIN) {
-		player_gain_to(knob_value(col, GAIN_MIN, GAIN_MAX, 1, 0));
-	} else {
-		player_speed_to(knob_value(col, SPEED_MIN, SPEED_MAX, SPEED_STEP, SPEED_UNITY));
-	}
+	nudge(c, col < at ? -1 : 1);
 }
 
 static bool double_click(enum pane p, int row) {

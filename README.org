@@ -37,25 +37,25 @@ this time, the n was not just my initial but also ncurses
 | -     | lower the gain by 1 dB                                                    |
 | =, +  | raise the gain by 1 dB, above 0 dB the loudest parts clip                 |
 | 0     | set the gain to 0 dB                                                      |
-| [     | lower the speed by 0.05x, the pitch falls with it                         |
-| ]     | raise the speed by 0.05x, the pitch rises with it                         |
-| 1     | set the speed to 1.00x                                                    |
+| [     | lower the rate by 0.05x, speed and pitch fall together                    |
+| ]     | raise the rate by 0.05x, speed and pitch rise together                    |
+| 1     | set the rate to 1.00x                                                     |
 
 *** other
 | C-l    | redraw the screen |
 | q, C-c | quit              |
 
 ** mouse
-| click on a row            | select the row                                          |
-| click on a pane title     | go to the pane                                          |
-| double click              | the same as enter on an album, a track or a queue entry |
-| right click               | the same as a                                           |
-| wheel                     | scroll the list under the pointer                       |
-| click on the play bar     | previous track, pause or resume, next track, repeat     |
-| click on the progress bar | seek to that place                                      |
-| click on a slider         | set the gain or the speed                               |
-| wheel on a slider         | change the gain by 1 dB or the speed by 0.05x           |
-| right click on a slider   | set the gain to 0 dB or the speed to 1.00x              |
+| click on a row             | select the row                                                 |
+| click on a pane title      | go to the pane                                                 |
+| double click               | the same as enter on an album, a track or a queue entry        |
+| right click                | the same as a                                                  |
+| wheel                      | scroll the list under the pointer                              |
+| click on the play bar      | previous track, pause or resume, next track, repeat            |
+| click on the progress bar  | seek to that place                                             |
+| click beside a slider knob | move the gain by 1 dB or the rate by 0.05x towards the pointer |
+| wheel on a slider          | change the gain by 1 dB or the rate by 0.05x                   |
+| right click on a slider    | set the gain to 0 dB or the rate to 1.00x                      |
 
 ** contact
 [[mailto:nusic@nburch.org][nusic@nburch.org]]
