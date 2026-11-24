@@ -1,12 +1,113 @@
 #include "gain.h"
 
+#include <math.h>
+
 // the loops round half away from zero without a call into libm
 // gcc vectorises them only with -fno-trapping-math, which configure sets
 
+// the soft clip is straight up to KNEE of full scale, from there a parabola bends it into full scale
+// the parabola ends flat where the straight line would be at 2 - KNEE of full scale
+#define KNEE          0.8
+#define KNEE_AT(fs)   (KNEE * (fs))
+#define KNEE_END(fs)  ((2.0 - KNEE) * (fs))
+#define KNEE_BEND(fs) (1.0 / (4.0 * (1.0 - KNEE) * (fs)))
+
+static void soft_s16(void* restrict dst, const void* restrict src, uint32_t n, float g) {
+	const int16_t* s = src;
+	int16_t* d = dst;
+	float at = (float)KNEE_AT(32767.0);
+	float end = (float)KNEE_END(32767.0);
+	float bend = (float)KNEE_BEND(32767.0);
+	uint32_t i;
+
+	for(i = 0; i < n; i++) {
+		float v = (float)s[i] * g;
+		float a = fabsf(v);
+		float e;
+
+		a = a > end ? end : a;
+		e = a - at;
+		e = e < 0.0f ? 0.0f : e;
+		a -= e * e * bend;
+		d[i] = (int16_t)copysignf(a + 0.5f, v);
+	}
+}
+
+static void soft_s32(void* restrict dst, const void* restrict src, uint32_t n, float g) {
+	const int32_t* s = src;
+	int32_t* d = dst;
+	double at = KNEE_AT(2147483647.0);
+	double end = KNEE_END(2147483647.0);
+	double bend = KNEE_BEND(2147483647.0);
+	double k = (double)g;
+	uint32_t i;
+
+	for(i = 0; i < n; i++) {
+		double v = (double)s[i] * k;
+		double a = fabs(v);
+		double e;
+
+		a = a > end ? end : a;
+		e = a - at;
+		e = e < 0.0 ? 0.0 : e;
+		a -= e * e * bend;
+		d[i] = (int32_t)copysign(a + 0.5, v);
+	}
+}
+
+static void soft_f32(void* restrict dst, const void* restrict src, uint32_t n, float g) {
+	const float* s = src;
+	float* d = dst;
+	float at = (float)KNEE_AT(1.0);
+	float end = (float)KNEE_END(1.0);
+	float bend = (float)KNEE_BEND(1.0);
+	uint32_t i;
+
+	for(i = 0; i < n; i++) {
+		float v = s[i] * g;
+		float a = fabsf(v);
+		float e;
+
+		a = a > end ? end : a;
+		e = a - at;
+		e = e < 0.0f ? 0.0f : e;
+		a -= e * e * bend;
+		d[i] = copysignf(a, v);
+	}
+}
+
+static void soft_f64(void* restrict dst, const void* restrict src, uint32_t n, float g) {
+	const double* s = src;
+	double* d = dst;
+	double at = KNEE_AT(1.0);
+	double end = KNEE_END(1.0);
+	double bend = KNEE_BEND(1.0);
+	double k = (double)g;
+	uint32_t i;
+
+	for(i = 0; i < n; i++) {
+		double v = s[i] * k;
+		double a = fabs(v);
+		double e;
+
+		a = a > end ? end : a;
+		e = a - at;
+		e = e < 0.0 ? 0.0 : e;
+		a -= e * e * bend;
+		d[i] = copysign(a, v);
+	}
+}
+
+// a gain of 1 or less cannot push a sample of the file past full scale, so the soft clip starts above it
 static void scale_s16(void* restrict dst, const void* restrict src, uint32_t n, float g) {
 	const int16_t* s = src;
 	int16_t* d = dst;
 	uint32_t i;
+
+	if(g > 1.0f) {
+		soft_s16(dst, src, n, g);
+		return;
+	}
 
 	for(i = 0; i < n; i++) {
 		float v = (float)s[i] * g;
@@ -24,6 +125,11 @@ static void scale_s32(void* restrict dst, const void* restrict src, uint32_t n, 
 	double k = (double)g;
 	uint32_t i;
 
+	if(g > 1.0f) {
+		soft_s32(dst, src, n, g);
+		return;
+	}
+
 	for(i = 0; i < n; i++) {
 		double v = (double)s[i] * k;
 
@@ -38,6 +144,11 @@ static void scale_f32(void* restrict dst, const void* restrict src, uint32_t n, 
 	float* d = dst;
 	uint32_t i;
 
+	if(g > 1.0f) {
+		soft_f32(dst, src, n, g);
+		return;
+	}
+
 	for(i = 0; i < n; i++) {
 		float v = s[i] * g;
 
@@ -51,6 +162,11 @@ static void scale_f64(void* restrict dst, const void* restrict src, uint32_t n, 
 	double* d = dst;
 	double k = (double)g;
 	uint32_t i;
+
+	if(g > 1.0f) {
+		soft_f64(dst, src, n, g);
+		return;
+	}
 
 	for(i = 0; i < n; i++) {
 		double v = s[i] * k;

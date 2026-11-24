@@ -35,7 +35,7 @@ this time, the n was not just my initial but also ncurses
 | .     | seek forward 5 s                                                          |
 | r     | repeat the queue, then the track, then nothing                            |
 | -     | lower the gain by 1 dB                                                    |
-| =, +  | raise the gain by 1 dB, above 0 dB the loudest parts clip                 |
+| =, +  | raise the gain by 1 dB, above 0 dB the loudest parts soft clip            |
 | 0     | set the gain to 0 dB                                                      |
 | [     | lower the rate by one step, speed and pitch fall together                 |
 | ]     | raise the rate by one step, speed and pitch rise together                 |

@@ -44,7 +44,7 @@ static void usage(void) {
 	       "  <, >            previous track, next track\n"
 	       "  ,  .            seek back 5 s, seek forward 5 s\n"
 	       "  r               repeat the queue, then the track, then nothing\n"
-	       "  -, =            lower, raise the gain by 1 dB, above 0 dB the loudest parts clip\n"
+	       "  -, =            lower, raise the gain by 1 dB, above 0 dB the loudest parts soft clip\n"
 	       "  [, ]            lower, raise the rate by one step, speed and pitch move together\n"
 	       "  \\               switch the rate between steps of 0.05x and steps of 1 semitone\n"
 	       "  0, 1            set the gain to 0 dB, the rate to 1.00x\n"
