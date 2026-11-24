@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#define MIDDLE_W 28
+#define KNOB_W   14
+
 static attr_t title_attr(enum pane p) {
 	if(p == ui.focus) {
 		return A_BOLD;
@@ -176,6 +179,62 @@ static void draw_queue(void) {
 	attrset(A_NORMAL);
 }
 
+int knob_at(int v, int min, int max) {
+	return (v - min) * (ui.knob_w - 1) / (max - min);
+}
+
+// label 6 columns, slider, gap 1, value 6, without the slider only the value shows
+static void draw_control(int y, const char* label, const char* value, int at, bool changed) {
+	int i;
+
+	attrset(changed ? ACCENT | A_BOLD : A_NORMAL);
+	mvprintw(y, ui.w - 8, "%6s", value);
+	if(!ui.knob_w) {
+		attrset(A_NORMAL);
+		return;
+	}
+
+	attrset(A_DIM);
+	mvaddstr(y, ui.ctl_x, label);
+	attrset(ACCENT | A_BOLD);
+	for(i = 0; i < at; i++) {
+		text(y, ui.knob_x + i, 1, ui.g->elapsed, false);
+	}
+
+	text(y, ui.knob_x + at, 1, ui.g->knob, false);
+	attrset(A_DIM);
+	mvhline(y, ui.knob_x + at + 1, ACS_HLINE, ui.knob_w - at - 1);
+	attrset(A_NORMAL);
+}
+
+// the gain and the speed sit at the right end of the bar and leave the middle at least MIDDLE_W columns
+// returns the columns they take with their gap, 0 when even the values do not fit
+static int draw_controls(int y, int cw) {
+	const struct play_status* s = &ui.s;
+	char gain[16];
+	char speed[16];
+	int room = cw - MIDDLE_W;
+
+	ui.knob_w = clamp(room - 15, 0, KNOB_W);
+	if(ui.knob_w < 6) {
+		ui.knob_w = 0;
+	}
+
+	if(room < 8) {
+		ui.ctl_x = 0;
+		return 0;
+	}
+
+	ui.knob_x = ui.w - 9 - ui.knob_w;
+	ui.ctl_x = ui.knob_w ? ui.knob_x - 6 : ui.w - 8;
+	snprintf(gain, sizeof(gain), s->gain ? "%+d dB" : "%d dB", s->gain);
+	snprintf(speed, sizeof(speed), "%d.%02dx", s->speed / 100, s->speed % 100);
+	draw_control(y, "gain", gain, knob_at(s->gain, GAIN_MIN, GAIN_MAX), s->gain != 0);
+	draw_control(y + 1, "speed", speed, knob_at(s->speed, SPEED_MIN, SPEED_MAX), s->speed != SPEED_UNITY);
+
+	return ui.w - 2 - ui.ctl_x + 2;
+}
+
 void draw_bar(void) {
 	const struct play_status* s = &ui.s;
 	char pos[16] = "";
@@ -195,6 +254,7 @@ void draw_bar(void) {
 	attrset(A_NORMAL);
 	mvhline(y, 1, ' ', inner);
 	mvhline(y + 1, 1, ' ', inner);
+	cw -= draw_controls(y, cw);
 	if(s->track) {
 		const struct album* al = &ui.lib->albums[s->track->album];
 

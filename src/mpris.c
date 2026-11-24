@@ -250,13 +250,13 @@ static const char* loop(enum play_repeat r) {
 }
 
 // appends the property as a variant, false when the interface has none of that name
-// nusic has no volume, no shuffle and one speed, a caller reads that from the values
+// nusic has no volume and no shuffle, a caller reads that from the values
 static bool property(DBusMessageIter* it, const char* iface, const char* name) {
 	struct play_status s;
 	dbus_bool_t yes = TRUE;
 	dbus_bool_t no = FALSE;
 	dbus_int64_t position;
-	double one = 1.0;
+	double value = 1.0;
 
 	if(!strcmp(iface, ROOT)) {
 		if(!strcmp(name, "Identity")) {
@@ -288,8 +288,17 @@ static bool property(DBusMessageIter* it, const char* iface, const char* name) {
 		player_status(&s);
 		position = (dbus_int64_t)s.position * 1000;
 		variant(it, DBUS_TYPE_INT64, "x", &position);
-	} else if(!strcmp(name, "Rate") || !strcmp(name, "MinimumRate") || !strcmp(name, "MaximumRate") || !strcmp(name, "Volume")) {
-		variant(it, DBUS_TYPE_DOUBLE, "d", &one);
+	} else if(!strcmp(name, "Rate")) {
+		value = m.s.speed / 100.0;
+		variant(it, DBUS_TYPE_DOUBLE, "d", &value);
+	} else if(!strcmp(name, "MinimumRate")) {
+		value = SPEED_MIN / 100.0;
+		variant(it, DBUS_TYPE_DOUBLE, "d", &value);
+	} else if(!strcmp(name, "MaximumRate")) {
+		value = SPEED_MAX / 100.0;
+		variant(it, DBUS_TYPE_DOUBLE, "d", &value);
+	} else if(!strcmp(name, "Volume")) {
+		variant(it, DBUS_TYPE_DOUBLE, "d", &value);
 	} else if(!strcmp(name, "Shuffle")) {
 		variant(it, DBUS_TYPE_BOOLEAN, "b", &no);
 	} else if(!strncmp(name, "Can", 3) && (!strcmp(name + 3, "GoNext") || !strcmp(name + 3, "GoPrevious") || !strcmp(name + 3, "Play") || !strcmp(name + 3, "Pause") || !strcmp(name + 3, "Seek") || !strcmp(name + 3, "Control"))) {
@@ -586,6 +595,7 @@ bool mpris_init(const struct library* lib) {
 
 	m.lib = lib;
 	m.quit = false;
+	player_status(&m.s);
 	dbus_error_init(&err);
 	m.conn = dbus_bus_get_private(DBUS_BUS_SESSION, &err);
 	if(m.conn) {
@@ -639,12 +649,12 @@ bool mpris_dispatch(void) {
 	return m.quit;
 }
 
-// a position that is not where the time since the last status puts it is a seek
+// a position that is not where the time since the last status puts it at the speed of that status is a seek
 void mpris_update(const struct play_status* s) {
-	const char* names[3];
+	const char* names[4];
 	uint32_t entry = s->track ? s->queue[s->index].id : 0;
 	int64_t now = now_ms();
-	int64_t expected = m.s.position + (m.s.state == PLAY_PLAYING ? now - m.at : 0);
+	int64_t expected = m.s.position + (m.s.state == PLAY_PLAYING ? (now - m.at) * m.s.speed / 100 : 0);
 	bool same = entry == m.entry && s->track == m.s.track;
 	bool seeked = same && s->track && (s->position > expected + SEEK_GAP || s->position + SEEK_GAP < expected);
 	size_t n = 0;
@@ -659,6 +669,10 @@ void mpris_update(const struct play_status* s) {
 
 	if(s->repeat != m.s.repeat) {
 		names[n++] = "LoopStatus";
+	}
+
+	if(s->speed != m.s.speed) {
+		names[n++] = "Rate";
 	}
 
 	m.s = *s;

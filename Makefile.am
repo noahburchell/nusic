@@ -27,6 +27,8 @@ nusic_SOURCES = \
 	src/decode.c \
 	src/decode.h \
 	src/draw.c \
+	src/gain.c \
+	src/gain.h \
 	src/library.c \
 	src/library.h \
 	src/mpris.c \

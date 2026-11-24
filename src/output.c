@@ -1,5 +1,6 @@
 #include "output.h"
 
+#include "gain.h"
 #include "report.h"
 #include "ring.h"
 
@@ -16,6 +17,9 @@
 #define RING_MAX     (16u << 20)
 #define RESERVE_DIV  8
 #define URGENT_DIV   4
+// the gain is kept in units of 1/65536, a change of it is spread over blocks of RAMP frames
+#define GAIN_ONE 65536
+#define RAMP     32
 
 typedef void wake_fn(void);
 
@@ -31,6 +35,7 @@ static struct {
 	struct spa_hook           stream_hook;
 	struct spa_audio_info_raw format;
 	struct ring               ring;
+	gain_fn*                  scale;
 	uint32_t                  stride;
 	uint32_t                  reserve;
 	uint32_t                  urgent;
@@ -40,8 +45,10 @@ static struct {
 	atomic_bool               failed;
 	atomic_bool               interrupt;
 	atomic_bool               drain_sent;
+	atomic_uint               gain;
+	uint32_t                  gain_now;
 	bool                      ring_ready;
-} out;
+} out = { .gain = GAIN_ONE };
 
 // runs on the loop thread, only the first failure is reported
 static void fail(const char* what, const char* detail) {
@@ -79,6 +86,37 @@ static void on_state(void* data, enum pw_stream_state old, enum pw_stream_state 
 	}
 }
 
+// runs on the realtime thread, gain_now is the gain the last frame went out with
+// a new gain is reached in steps over the buffer, a single step would click
+static void amplify(uint8_t* dst, const uint8_t* src, uint32_t frames) {
+	uint32_t target = atomic_load_explicit(&out.gain, memory_order_relaxed);
+	uint32_t ch = out.format.channels;
+	float g = (float)out.gain_now / GAIN_ONE;
+	float step;
+	uint32_t n;
+
+	if(target == out.gain_now || !frames) {
+		out.gain_now = target;
+		if(target == GAIN_ONE) {
+			memcpy(dst, src, (size_t)frames * out.stride);
+		} else {
+			out.scale(dst, src, frames * ch, (float)target / GAIN_ONE);
+		}
+
+		return;
+	}
+
+	out.gain_now = target;
+	step = ((float)target / GAIN_ONE - g) / (float)((frames + RAMP - 1) / RAMP);
+	for(; frames; frames -= n) {
+		n = frames < RAMP ? frames : RAMP;
+		g += step;
+		out.scale(dst, src, n * ch, g);
+		dst += (size_t)n * out.stride;
+		src += (size_t)n * out.stride;
+	}
+}
+
 // runs on the realtime thread, takes no lock and makes no call that blocks
 static void on_process(void* data) {
 	struct pw_buffer* b = pw_stream_dequeue_buffer(out.stream);
@@ -112,7 +150,7 @@ static void on_process(void* data) {
 		have = want;
 	}
 
-	memcpy(d->data, src, (size_t)have * out.stride);
+	amplify(d->data, src, have);
 	ring_consume(&out.ring, have * out.stride);
 	if(skipped + have) {
 		atomic_fetch_add_explicit(&out.played, skipped + have, memory_order_relaxed);
@@ -240,20 +278,25 @@ void out_fini(void) {
 	pw_deinit();
 }
 
-// the loop lock is held
-static bool open_stream(const struct spa_audio_info_raw* fmt, uint32_t stride) {
+// the loop lock is held, the stream is declared at the rate of the file times the speed
+// pipewire resamples it from there, so the pitch moves with the speed
+static bool open_stream(const struct spa_audio_info_raw* fmt, uint32_t stride, uint32_t speed) {
 	uint8_t buf[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
 	const struct spa_pod* params[1];
 	struct pw_properties* props;
-	uint64_t bytes = (uint64_t)fmt->rate * stride * RING_SECONDS;
+	struct spa_audio_info_raw wire = *fmt;
+	gain_fn* scale = gain_for(fmt->format);
+	uint64_t bytes;
 	int r;
 
-	if(atomic_load(&out.failed) || !ring_map(&out.ring, bytes < RING_MAX ? (uint32_t)bytes : RING_MAX)) {
+	wire.rate = (uint32_t)(((uint64_t)fmt->rate * speed + 50) / 100);
+	bytes = (uint64_t)wire.rate * stride * RING_SECONDS;
+	if(atomic_load(&out.failed) || !scale || !wire.rate || !ring_map(&out.ring, bytes < RING_MAX ? (uint32_t)bytes : RING_MAX)) {
 		return false;
 	}
 
-	// node.rate lets pipewire run the graph at the rate of the file where the device allows it
+	// node.rate lets pipewire run the graph at the rate of the stream where the device allows it
 	props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio",
 	                          PW_KEY_MEDIA_CATEGORY, "Playback",
 	                          PW_KEY_MEDIA_ROLE, "Music",
@@ -261,7 +304,7 @@ static bool open_stream(const struct spa_audio_info_raw* fmt, uint32_t stride) {
 	                          PW_KEY_NODE_NAME, "nusic",
 	                          nullptr);
 	if(props) {
-		pw_properties_setf(props, PW_KEY_NODE_RATE, "1/%u", fmt->rate);
+		pw_properties_setf(props, PW_KEY_NODE_RATE, "1/%u", wire.rate);
 	}
 
 	out.stream = pw_stream_new(out.core, "nusic", props);
@@ -272,7 +315,9 @@ static bool open_stream(const struct spa_audio_info_raw* fmt, uint32_t stride) {
 	}
 
 	out.format = *fmt;
+	out.scale = scale;
 	out.stride = stride;
+	out.gain_now = atomic_load(&out.gain);
 	out.reserve = out.ring.size / RESERVE_DIV / stride * stride;
 	out.urgent = 0;
 	atomic_store(&out.drain_sent, false);
@@ -280,7 +325,7 @@ static bool open_stream(const struct spa_audio_info_raw* fmt, uint32_t stride) {
 	atomic_store(&out.draining, false);
 	atomic_store(&out.drained, false);
 	pw_stream_add_listener(out.stream, &out.stream_hook, &stream_events, nullptr);
-	params[0] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &out.format);
+	params[0] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &wire);
 	r = pw_stream_connect(out.stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,
 	                      (enum pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS),
 	                      params, 1);
@@ -293,7 +338,7 @@ static bool open_stream(const struct spa_audio_info_raw* fmt, uint32_t stride) {
 	return true;
 }
 
-bool out_open(const struct spa_audio_info_raw* fmt, uint32_t stride) {
+bool out_open(const struct spa_audio_info_raw* fmt, uint32_t stride, uint32_t speed) {
 	bool ok;
 
 	pw_thread_loop_lock(out.loop);
@@ -301,7 +346,7 @@ bool out_open(const struct spa_audio_info_raw* fmt, uint32_t stride) {
 		close_stream();
 	}
 
-	ok = open_stream(fmt, stride);
+	ok = open_stream(fmt, stride, speed);
 	pw_thread_loop_unlock(out.loop);
 
 	return ok;
@@ -392,6 +437,10 @@ void out_pause(bool paused) {
 	}
 
 	pw_thread_loop_unlock(out.loop);
+}
+
+void out_gain(float gain) {
+	atomic_store(&out.gain, (uint32_t)(gain * GAIN_ONE + 0.5f));
 }
 
 void out_interrupt(bool on) {

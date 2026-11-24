@@ -9,6 +9,8 @@
 
 #define ACCENT COLOR_PAIR(1)
 
+#define SPEED_STEP 5
+
 enum {
 	ROW_ALBUM,
 	ROW_TRACK,
@@ -51,6 +53,7 @@ struct list {
 // the page and the queue share the main_w columns from main_x on, side by side when split,
 // otherwise only tab shows, x and w give every pane its columns either way
 // the hit boxes of the titles and of the bar are set when they are drawn
+// ctl_x is where the gain and the speed start, 0 when they do not show, knob_w is 0 without the sliders
 struct screen {
 	const struct library* lib;
 	const struct glyphs*  g;
@@ -79,6 +82,9 @@ struct screen {
 	int                   repeat_x;
 	int                   bar_x;
 	int                   bar_w;
+	int                   ctl_x;
+	int                   knob_x;
+	int                   knob_w;
 	uint32_t              bar_ms;
 	enum pane             focus;
 	enum pane             tab;
@@ -92,6 +98,8 @@ extern struct screen ui;
 int clamp(int v, int lo, int hi);
 bool too_small(void);
 bool shown(enum pane p);
+// the column of a slider that stands for v on the scale from min to max
+int knob_at(int v, int min, int max);
 // draws everything, draw_bar only the play bar
 void draw(void);
 void draw_bar(void);

@@ -8,7 +8,8 @@
 // wake runs on a pipewire thread when the stream has drained or the output failed
 bool out_init(void (*wake)(void));
 void out_fini(void);
-bool out_open(const struct spa_audio_info_raw* fmt, uint32_t stride);
+// speed is in percent, the frames of fmt play at that share of their rate and the pitch moves with it
+bool out_open(const struct spa_audio_info_raw* fmt, uint32_t stride, uint32_t speed);
 // closes at once, what is queued is not played
 void out_close(void);
 bool out_is_open(void);
@@ -23,6 +24,8 @@ void out_flush(void);
 void out_drain(void);
 bool out_drained(void);
 void out_pause(bool paused);
+// every sample is multiplied by gain and clipped at full scale, 1 leaves the audio as it is
+void out_gain(float gain);
 // while set, out_wait returns 0 without blocking
 void out_interrupt(bool on);
 // frames played or skipped since out_open

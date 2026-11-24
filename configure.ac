@@ -162,7 +162,8 @@ AS_IF([test "x$enable_debug" = xyes], [
   NUSIC_CFLAGS="$NUSIC_CFLAGS$nusic_san"
   NUSIC_LDFLAGS="$NUSIC_LDFLAGS$nusic_san"
 ], [
-  NUSIC_TRY_CFLAGS([-O2 -pipe -fno-plt], [NUSIC_OPT_CFLAGS])
+  # nusic never reads the floating point exception flags, and gcc vectorises the gain loops only without them
+  NUSIC_TRY_CFLAGS([-O2 -pipe -fno-plt -fno-trapping-math], [NUSIC_OPT_CFLAGS])
   NUSIC_TRY_LDFLAG([-Wl,-O2], [NUSIC_OPT_LDFLAGS])
   NUSIC_TRY_LDFLAG([-Wl,--as-needed], [NUSIC_OPT_LDFLAGS])
   NUSIC_TRY_LDFLAG([-Wl,--hash-style=gnu], [NUSIC_OPT_LDFLAGS])
@@ -207,6 +208,8 @@ AS_IF([test "x$enable_hardened" = xyes], [
 	-fno-strict-overflow
   ], [NUSIC_CFLAGS])
 ])
+
+AC_SEARCH_LIBS([powf], [m], [], [AC_MSG_ERROR([powf is missing from libc and libm])])
 
 # ncurses 6 reports the mouse wheel, ffmpeg 5.1 is the first release with AVChannelLayout
 NUSIC_REQUIRE([NCURSES], [ncursesw >= 6.0])

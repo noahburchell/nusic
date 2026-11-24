@@ -34,6 +34,12 @@ this time, the n was not just my initial but also ncurses
 | ,     | seek back 5 s                                                             |
 | .     | seek forward 5 s                                                          |
 | r     | repeat the queue, then the track, then nothing                            |
+| -     | lower the gain by 1 dB                                                    |
+| =, +  | raise the gain by 1 dB, above 0 dB the loudest parts clip                 |
+| 0     | set the gain to 0 dB                                                      |
+| [     | lower the speed by 0.05x, the pitch falls with it                         |
+| ]     | raise the speed by 0.05x, the pitch rises with it                         |
+| 1     | set the speed to 1.00x                                                    |
 
 *** other
 | C-l    | redraw the screen |
@@ -47,6 +53,9 @@ this time, the n was not just my initial but also ncurses
 | wheel                     | scroll the list under the pointer                       |
 | click on the play bar     | previous track, pause or resume, next track, repeat     |
 | click on the progress bar | seek to that place                                      |
+| click on a slider         | set the gain or the speed                               |
+| wheel on a slider         | change the gain by 1 dB or the speed by 0.05x           |
+| right click on a slider   | set the gain to 0 dB or the speed to 1.00x              |
 
 ** contact
 [[mailto:nusic@nburch.org][nusic@nburch.org]]

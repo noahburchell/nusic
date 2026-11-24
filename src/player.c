@@ -5,6 +5,7 @@
 #include "report.h"
 
 #include <errno.h>
+#include <math.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <stdlib.h>
@@ -34,7 +35,7 @@ struct mark {
 	uint32_t            index;
 };
 
-// lock guards queue to rate, the fields after rate belong to the player thread
+// lock guards queue to speed, the fields after speed belong to the player thread
 // a command stays pending until the player thread has replaced the marks for it
 // version changes with the queue and with the repeat mode, ending is set once the stream
 // holds the last audio of the queue
@@ -63,14 +64,17 @@ static struct {
 	uint32_t            n_marks;
 	uint64_t            flushed;
 	uint32_t            rate;
+	int                 gain;
+	int                 speed;
 	struct decoder      dec;
 	const struct track* track;
 	enum phase          phase;
 	uint64_t            written;
 	uint32_t            index;
 	uint32_t            id;
+	int                 stream_speed;
 	bool                open;
-} p = { .lock = PTHREAD_MUTEX_INITIALIZER, .next_id = 1 };
+} p = { .lock = PTHREAD_MUTEX_INITIALIZER, .next_id = 1, .speed = SPEED_UNITY };
 
 static void wake(void) {
 	sem_post(&p.wake);
@@ -123,7 +127,7 @@ static void status_locked(struct play_status* s) {
 	uint64_t ms;
 	uint32_t i;
 
-	*s = (struct play_status){ .queue = p.queue, .count = p.count, .state = PLAY_STOPPED, .repeat = p.repeat };
+	*s = (struct play_status){ .queue = p.queue, .count = p.count, .state = PLAY_STOPPED, .repeat = p.repeat, .gain = p.gain, .speed = p.speed };
 	if(p.pending) {
 		i = p.cmd_index == STOP ? p.count : find(p.cmd_id, p.cmd_index);
 		if(i == p.count) {
@@ -260,10 +264,11 @@ static void push_mark(void) {
 
 // lock is held, the stream is opened for the decoder and holds nothing but its track
 static bool reopen(void) {
-	if(!out_open(&p.dec.format, p.dec.stride)) {
+	if(!out_open(&p.dec.format, p.dec.stride, (uint32_t)p.speed)) {
 		return false;
 	}
 
+	p.stream_speed = p.speed;
 	p.written = 0;
 	p.flushed = 0;
 	p.n_marks = 0;
@@ -349,7 +354,7 @@ static void catch_up(void) {
 	}
 }
 
-// a command: the stream is kept when it is running in the same format, what it holds is skipped
+// a command: the stream is kept when it is running in the same format and speed, what it holds is skipped
 // here asks for the playing track to go on from where it is, with ms as the place when the stream is not kept
 static void begin(uint32_t seq, uint32_t index, uint32_t ms, bool resume, bool here) {
 	bool ok = true;
@@ -374,7 +379,7 @@ static void begin(uint32_t seq, uint32_t index, uint32_t ms, bool resume, bool h
 
 	// a paused stream still holds a quantum of the old audio inside pipewire, so it is replaced
 	pthread_mutex_lock(&p.lock);
-	keep = p.phase == DECODING && p.state == PLAY_PLAYING && out_matches(&p.dec.format);
+	keep = p.phase == DECODING && p.state == PLAY_PLAYING && p.speed == p.stream_speed && out_matches(&p.dec.format);
 	p.ending = false;
 	if(resume || p.state == PLAY_STOPPED) {
 		p.state = PLAY_PLAYING;
@@ -802,6 +807,65 @@ void player_set_repeat(enum play_repeat repeat) {
 		replan();
 	}
 
+	pthread_mutex_unlock(&p.lock);
+	notify();
+}
+
+static int limit(int v, int lo, int hi) {
+	if(v < lo) {
+		return lo;
+	}
+
+	return v > hi ? hi : v;
+}
+
+// lock is held
+static void gain_locked(int db) {
+	p.gain = limit(db, GAIN_MIN, GAIN_MAX);
+	out_gain(powf(10.0f, (float)p.gain / 20.0f));
+}
+
+void player_gain_by(int db) {
+	pthread_mutex_lock(&p.lock);
+	gain_locked(p.gain + db);
+	pthread_mutex_unlock(&p.lock);
+	notify();
+}
+
+void player_gain_to(int db) {
+	pthread_mutex_lock(&p.lock);
+	gain_locked(db);
+	pthread_mutex_unlock(&p.lock);
+	notify();
+}
+
+// lock is held, the stream has its speed from the time it opens
+// so what plays starts over from where it is in a stream of the new speed
+static void speed_locked(int percent) {
+	struct play_status s;
+
+	percent = limit(percent, SPEED_MIN, SPEED_MAX);
+	if(percent == p.speed) {
+		return;
+	}
+
+	p.speed = percent;
+	status_locked(&s);
+	if(s.track) {
+		seek_locked(&s, s.position);
+	}
+}
+
+void player_speed_by(int percent) {
+	pthread_mutex_lock(&p.lock);
+	speed_locked(p.speed + percent);
+	pthread_mutex_unlock(&p.lock);
+	notify();
+}
+
+void player_speed_to(int percent) {
+	pthread_mutex_lock(&p.lock);
+	speed_locked(percent);
 	pthread_mutex_unlock(&p.lock);
 	notify();
 }

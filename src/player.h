@@ -2,6 +2,13 @@
 
 #include "library.h"
 
+// the gain is in dB, the speed in percent of the speed of the recording
+#define GAIN_MIN    (-40)
+#define GAIN_MAX    24
+#define SPEED_MIN   50
+#define SPEED_MAX   200
+#define SPEED_UNITY 100
+
 enum play_state {
 	PLAY_STOPPED,
 	PLAY_PLAYING,
@@ -30,6 +37,8 @@ struct play_status {
 	uint32_t                 position;
 	enum play_state          state;
 	enum play_repeat         repeat;
+	int                      gain;
+	int                      speed;
 };
 
 // notify is an eventfd, written whenever the status changes other than by time passing
@@ -59,4 +68,11 @@ void player_seek_to(uint32_t ms);
 // next goes from the last track to the first while the queue repeats
 void player_repeat(void);
 void player_set_repeat(enum play_repeat repeat);
+// the audio is scaled by the gain and clipped at full scale, 0 dB leaves it as it is
+void player_gain_by(int db);
+void player_gain_to(int db);
+// the speed moves the pitch with it, what plays goes on from where it is after a short break
+// position and duration stay in the time of the recording
+void player_speed_by(int percent);
+void player_speed_to(int percent);
 void player_status(struct play_status* s);

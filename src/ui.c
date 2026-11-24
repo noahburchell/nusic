@@ -22,6 +22,12 @@
 #define WHEEL     3
 #define DOUBLE_MS 400
 
+enum control {
+	CTL_NONE,
+	CTL_GAIN,
+	CTL_SPEED,
+};
+
 // control or meta with an arrow has no key code of its own, these stand for it
 #define KEY_ENTRY_UP   (KEY_MAX + 1000)
 #define KEY_ENTRY_DOWN (KEY_MAX + 1001)
@@ -280,6 +286,63 @@ static void toggle(void) {
 	}
 }
 
+static void nudge(enum control c, int dir) {
+	if(c == CTL_GAIN) {
+		player_gain_by(dir);
+	} else if(c == CTL_SPEED) {
+		player_speed_by(dir * SPEED_STEP);
+	}
+}
+
+static void reset(enum control c) {
+	if(c == CTL_GAIN) {
+		player_gain_to(0);
+	} else if(c == CTL_SPEED) {
+		player_speed_to(SPEED_UNITY);
+	}
+}
+
+// the control of the play bar that shows at x, y
+static enum control control_at(int x, int y) {
+	if(!ui.ctl_x || x < ui.ctl_x || x > ui.w - 3) {
+		return CTL_NONE;
+	}
+
+	if(y == ui.h - 3) {
+		return CTL_GAIN;
+	}
+
+	return y == ui.h - 2 ? CTL_SPEED : CTL_NONE;
+}
+
+// the value at slider column col on the scale from min to max, a multiple of step above min
+// the column that shows unity gives unity, the scale may step over it otherwise
+static int knob_value(int col, int min, int max, int step, int unity) {
+	int v;
+
+	if(col == knob_at(unity, min, max)) {
+		return unity;
+	}
+
+	v = (col * (max - min) + (ui.knob_w - 1) / 2) / (ui.knob_w - 1);
+
+	return min + (v + step / 2) / step * step;
+}
+
+static void click_control(enum control c, int x) {
+	int col = x - ui.knob_x;
+
+	if(!ui.knob_w || col < 0 || col >= ui.knob_w) {
+		return;
+	}
+
+	if(c == CTL_GAIN) {
+		player_gain_to(knob_value(col, GAIN_MIN, GAIN_MAX, 1, 0));
+	} else {
+		player_speed_to(knob_value(col, SPEED_MIN, SPEED_MAX, SPEED_STEP, SPEED_UNITY));
+	}
+}
+
 static bool double_click(enum pane p, int row) {
 	struct timespec now;
 	int64_t ms;
@@ -354,6 +417,8 @@ static void click(int x, int y) {
 		click_title(x);
 	} else if(y >= 1 && y <= ui.rows) {
 		click_list(x, y - 1, false);
+	} else if(control_at(x, y)) {
+		click_control(control_at(x, y), x);
 	} else if(y == ui.h - 3) {
 		if(x >= ui.prev_x - 1 && x <= ui.prev_x + 2) {
 			player_prev();
@@ -400,6 +465,8 @@ static void mouse(void) {
 		if(e.bstate & (BUTTON4_PRESSED | BUTTON5_PRESSED)) {
 			if(e.y >= 1 && e.y <= ui.rows) {
 				scroll_by(&ui.lists[pane_at(e.x)], e.bstate & BUTTON4_PRESSED ? -WHEEL : WHEEL);
+			} else {
+				nudge(control_at(e.x, e.y), e.bstate & BUTTON4_PRESSED ? 1 : -1);
 			}
 
 			continue;
@@ -408,6 +475,8 @@ static void mouse(void) {
 		if(e.bstate & (BUTTON3_PRESSED | BUTTON3_CLICKED)) {
 			if(e.y >= 1 && e.y <= ui.rows) {
 				click_list(e.x, e.y - 1, true);
+			} else {
+				reset(control_at(e.x, e.y));
 			}
 
 			continue;
@@ -523,6 +592,25 @@ static void key(int ch) {
 		case 'r':
 			player_repeat();
 			break;
+		case '-':
+			nudge(CTL_GAIN, -1);
+			break;
+		case '=':
+		case '+':
+			nudge(CTL_GAIN, 1);
+			break;
+		case '0':
+			reset(CTL_GAIN);
+			break;
+		case '[':
+			nudge(CTL_SPEED, -1);
+			break;
+		case ']':
+			nudge(CTL_SPEED, 1);
+			break;
+		case '1':
+			reset(CTL_SPEED);
+			break;
 		case 27:
 			meta_key(getch());
 			break;
@@ -547,7 +635,7 @@ static void key(int ch) {
 	}
 }
 
-// wakes once a second on the second, and when the track ends
+// wakes once a second of the track on the second, and when the track ends
 static int timeout_ms(const struct play_status* s) {
 	uint32_t ms;
 	uint32_t left;
@@ -559,7 +647,7 @@ static int timeout_ms(const struct play_status* s) {
 	ms = 1000 - s->position % 1000;
 	left = s->track->duration > s->position ? s->track->duration - s->position : 1000;
 
-	return (int)(left < ms ? left : ms) + 20;
+	return (int)((left < ms ? left : ms) * 100 / (uint32_t)s->speed) + 20;
 }
 
 static void take_message(void) {
