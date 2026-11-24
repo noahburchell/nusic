@@ -5,19 +5,30 @@
 // the loops round half away from zero without a call into libm
 // gcc vectorises them only with -fno-trapping-math, which configure sets
 
-// the soft clip is straight up to KNEE of full scale, from there a parabola bends it into full scale
-// the parabola ends flat where the straight line would be at 2 - KNEE of full scale
-#define KNEE          0.8
-#define KNEE_AT(fs)   (KNEE * (fs))
-#define KNEE_END(fs)  ((2.0 - KNEE) * (fs))
-#define KNEE_BEND(fs) (1.0 / (4.0 * (1.0 - KNEE) * (fs)))
+// the soft clip is straight up to the knee, from there a parabola bends it into full scale
+// the parabola ends flat where the straight line would be at 2 - knee, all three are for a full scale of 1
+static bool soft;
+static double soft_at;
+static double soft_end;
+static double soft_bend;
+
+void gain_soft(bool on, double knee) {
+	soft = on && knee < 1.0;
+	if(!soft) {
+		return;
+	}
+
+	soft_at = knee;
+	soft_end = 2.0 - knee;
+	soft_bend = 1.0 / (4.0 * (1.0 - knee));
+}
 
 static void soft_s16(void* restrict dst, const void* restrict src, uint32_t n, float g) {
 	const int16_t* s = src;
 	int16_t* d = dst;
-	float at = (float)KNEE_AT(32767.0);
-	float end = (float)KNEE_END(32767.0);
-	float bend = (float)KNEE_BEND(32767.0);
+	float at = (float)(soft_at * 32767.0);
+	float end = (float)(soft_end * 32767.0);
+	float bend = (float)(soft_bend / 32767.0);
 	uint32_t i;
 
 	for(i = 0; i < n; i++) {
@@ -36,9 +47,9 @@ static void soft_s16(void* restrict dst, const void* restrict src, uint32_t n, f
 static void soft_s32(void* restrict dst, const void* restrict src, uint32_t n, float g) {
 	const int32_t* s = src;
 	int32_t* d = dst;
-	double at = KNEE_AT(2147483647.0);
-	double end = KNEE_END(2147483647.0);
-	double bend = KNEE_BEND(2147483647.0);
+	double at = soft_at * 2147483647.0;
+	double end = soft_end * 2147483647.0;
+	double bend = soft_bend / 2147483647.0;
 	double k = (double)g;
 	uint32_t i;
 
@@ -58,9 +69,9 @@ static void soft_s32(void* restrict dst, const void* restrict src, uint32_t n, f
 static void soft_f32(void* restrict dst, const void* restrict src, uint32_t n, float g) {
 	const float* s = src;
 	float* d = dst;
-	float at = (float)KNEE_AT(1.0);
-	float end = (float)KNEE_END(1.0);
-	float bend = (float)KNEE_BEND(1.0);
+	float at = (float)soft_at;
+	float end = (float)soft_end;
+	float bend = (float)soft_bend;
 	uint32_t i;
 
 	for(i = 0; i < n; i++) {
@@ -79,9 +90,9 @@ static void soft_f32(void* restrict dst, const void* restrict src, uint32_t n, f
 static void soft_f64(void* restrict dst, const void* restrict src, uint32_t n, float g) {
 	const double* s = src;
 	double* d = dst;
-	double at = KNEE_AT(1.0);
-	double end = KNEE_END(1.0);
-	double bend = KNEE_BEND(1.0);
+	double at = soft_at;
+	double end = soft_end;
+	double bend = soft_bend;
 	double k = (double)g;
 	uint32_t i;
 
@@ -99,12 +110,13 @@ static void soft_f64(void* restrict dst, const void* restrict src, uint32_t n, f
 }
 
 // a gain of 1 or less cannot push a sample of the file past full scale, so the soft clip starts above it
+// without the soft clip a sample past full scale is cut off at it
 static void scale_s16(void* restrict dst, const void* restrict src, uint32_t n, float g) {
 	const int16_t* s = src;
 	int16_t* d = dst;
 	uint32_t i;
 
-	if(g > 1.0f) {
+	if(soft && g > 1.0f) {
 		soft_s16(dst, src, n, g);
 		return;
 	}
@@ -125,7 +137,7 @@ static void scale_s32(void* restrict dst, const void* restrict src, uint32_t n, 
 	double k = (double)g;
 	uint32_t i;
 
-	if(g > 1.0f) {
+	if(soft && g > 1.0f) {
 		soft_s32(dst, src, n, g);
 		return;
 	}
@@ -144,7 +156,7 @@ static void scale_f32(void* restrict dst, const void* restrict src, uint32_t n, 
 	float* d = dst;
 	uint32_t i;
 
-	if(g > 1.0f) {
+	if(soft && g > 1.0f) {
 		soft_f32(dst, src, n, g);
 		return;
 	}
@@ -163,7 +175,7 @@ static void scale_f64(void* restrict dst, const void* restrict src, uint32_t n, 
 	double k = (double)g;
 	uint32_t i;
 
-	if(g > 1.0f) {
+	if(soft && g > 1.0f) {
 		soft_f64(dst, src, n, g);
 		return;
 	}

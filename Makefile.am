@@ -22,6 +22,8 @@ bin_PROGRAMS = nusic
 
 nusic_SOURCES = \
 	src/nusic.c \
+	src/conf.c \
+	src/conf.h \
 	src/db.c \
 	src/db.h \
 	src/decode.c \
@@ -35,6 +37,8 @@ nusic_SOURCES = \
 	src/mpris.h \
 	src/output.c \
 	src/output.h \
+	src/path.c \
+	src/path.h \
 	src/player.c \
 	src/player.h \
 	src/report.c \

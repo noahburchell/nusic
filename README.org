@@ -35,7 +35,7 @@ this time, the n was not just my initial but also ncurses
 | .     | seek forward 5 s                                                          |
 | r     | repeat the queue, then the track, then nothing                            |
 | -     | lower the gain by 1 dB                                                    |
-| =, +  | raise the gain by 1 dB, above 0 dB the loudest parts soft clip            |
+| =, +  | raise the gain by 1 dB, above 0 dB the loudest parts clip                 |
 | 0     | set the gain to 0 dB                                                      |
 | [     | lower the rate by one step, speed and pitch fall together                 |
 | ]     | raise the rate by one step, speed and pitch rise together                 |
@@ -58,6 +58,16 @@ this time, the n was not just my initial but also ncurses
 | wheel on a slider          | change the gain by 1 dB or the rate by one step                   |
 | right click on a slider    | set the gain to 0 dB or the rate to 1.00x                         |
 | click on the rate value    | the same as \                                                     |
+
+** config
+=$XDG_CONFIG_HOME/nusic/config=, XDG_CONFIG_HOME defaults to =~/.config=
+
+=KEY=VALUE=, # is a comment
+
+| soft-clip         | false | true or false, above 0 dB bend the loudest parts into full scale, not a hard clip    |
+| soft-clip-knee    | 0.8   | 0 to 1, the share of full scale where the soft clip starts to bend, 1 is a hard clip |
+| rate-default-unit | st    | x or st, the steps of the rate at startup, 0.05x or 1 semitone                       |
+| always-tabbed     | false | true or false, show the albums and the queue one at a time at every width            |
 
 ** contact
 [[mailto:nusic@nburch.org][nusic@nburch.org]]

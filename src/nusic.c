@@ -1,4 +1,6 @@
+#include "conf.h"
 #include "db.h"
+#include "gain.h"
 #include "library.h"
 #include "player.h"
 #include "ui.h"
@@ -44,7 +46,7 @@ static void usage(void) {
 	       "  <, >            previous track, next track\n"
 	       "  ,  .            seek back 5 s, seek forward 5 s\n"
 	       "  r               repeat the queue, then the track, then nothing\n"
-	       "  -, =            lower, raise the gain by 1 dB, above 0 dB the loudest parts soft clip\n"
+	       "  -, =            lower, raise the gain by 1 dB, above 0 dB the loudest parts clip\n"
 	       "  [, ]            lower, raise the rate by one step, speed and pitch move together\n"
 	       "  \\               switch the rate between steps of 0.05x and steps of 1 semitone\n"
 	       "  0, 1            set the gain to 0 dB, the rate to 1.00x\n"
@@ -72,12 +74,21 @@ static void usage(void) {
 	       "the panes are the album artists, the albums of the selected artist and the queue\n"
 	       "a terminal under 120 columns shows the albums and the queue one at a time\n"
 	       "\n"
+	       "config keys:\n"
+	       "  soft-clip          true or false, above 0 dB bend the loudest parts into full scale, not a hard clip\n"
+	       "  soft-clip-knee     0 to 1, the share of full scale where the soft clip starts to bend, 1 is a hard clip\n"
+	       "  rate-default-unit  x or st, the steps of the rate at startup, 0.05x or 1 semitone\n"
+	       "  always-tabbed      true or false, show the albums and the queue one at a time at every width\n"
+	       "\n"
 	       "other programs read what plays and control it through the mpris interface of the session bus\n"
 	       "\n"
 	       "PATH is an audio file or a directory searched for audio files\n"
 	       "without PATH the library is the database, with PATH it is the files under PATH\n"
 	       "--build-db replaces what the database held, a file that has not changed is not read again\n"
-	       "the database is $XDG_DATA_HOME/nusic/library.db, XDG_DATA_HOME defaults to ~/.local/share\n");
+	       "the database is $XDG_DATA_HOME/nusic/library.db, XDG_DATA_HOME defaults to ~/.local/share\n"
+	       "the config is $XDG_CONFIG_HOME/nusic/config, XDG_CONFIG_HOME defaults to ~/.config\n"
+	       "a config that does not exist is written with every key at its default\n"
+	       "a line of the config is KEY=VALUE, a line that starts with # is a comment\n");
 }
 
 static void try_help(void) {
@@ -173,6 +184,11 @@ int main(int argc, char** argv) {
 
 	setlocale(LC_ALL, "");
 	av_log_set_level(AV_LOG_QUIET);
+	if(!conf_load()) {
+		return 1;
+	}
+
+	gain_soft(conf.soft_clip, conf.knee);
 	if(build) {
 		return build_db(paths, n, tty);
 	}

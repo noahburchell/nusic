@@ -1,5 +1,6 @@
 #include "db.h"
 
+#include "path.h"
 #include "report.h"
 
 #include <errno.h>
@@ -36,44 +37,7 @@ static const char select_tracks[] = "SELECT path, mtime, size, title, artist, al
 static const char insert_track[] = "INSERT INTO track VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 bool db_path(char* buf, size_t n) {
-	const char* data = getenv("XDG_DATA_HOME");
-	const char* home = getenv("HOME");
-	int len;
-
-	// the base directory specification has a relative XDG_DATA_HOME ignored
-	if(data && data[0] == '/') {
-		len = snprintf(buf, n, "%s/nusic/library.db", data);
-	} else if(home && home[0] == '/') {
-		len = snprintf(buf, n, "%s/.local/share/nusic/library.db", home);
-	} else {
-		report("neither XDG_DATA_HOME nor HOME is an absolute path, the database has no place");
-		return false;
-	}
-
-	if((size_t)len >= n) {
-		report("%s: path is too long", data && data[0] == '/' ? data : home);
-		return false;
-	}
-
-	return true;
-}
-
-// the base directory specification asks for mode 0700 on a directory that is created
-static bool make_parents(char* path) {
-	char* p;
-
-	for(p = strchr(path + 1, '/'); p; p = strchr(p + 1, '/')) {
-		*p = 0;
-		if(mkdir(path, 0700) < 0 && errno != EEXIST) {
-			report("mkdir %s: %s", path, strerror(errno));
-			*p = '/';
-			return false;
-		}
-
-		*p = '/';
-	}
-
-	return true;
+	return nusic_path(buf, n, "XDG_DATA_HOME", ".local/share", "library.db", "the database");
 }
 
 static void fail(sqlite3* db, const char* path, bool replacing) {
@@ -207,6 +171,7 @@ bool db_write(const char* path, const struct raw* r, uint32_t n) {
 	}
 
 	if(!make_parents(tmp)) {
+		report("mkdir %s: %s", tmp, strerror(errno));
 		return false;
 	}
 

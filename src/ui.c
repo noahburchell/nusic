@@ -1,5 +1,6 @@
 #include "ui.h"
 
+#include "conf.h"
 #include "mpris.h"
 #include "player.h"
 #include "report.h"
@@ -74,7 +75,7 @@ static void layout(void) {
 	ui.main_w = ui.w - 1 - ui.main_x;
 	ui.rows = ui.h - 5;
 	half = (ui.main_w - 1) / 2;
-	ui.split = ui.w >= SPLIT_W;
+	ui.split = !conf.always_tabbed && ui.w >= SPLIT_W;
 	ui.x[PANE_ARTISTS] = 1;
 	ui.pane_w[PANE_ARTISTS] = ui.side;
 	ui.x[PANE_PAGE] = ui.main_x;
@@ -708,6 +709,7 @@ void ui_run(const struct library* lib, int notify) {
 
 	ui.lib = lib;
 	ui.notify = notify;
+	ui.semitones = conf.semitones;
 	ui.g = strcmp(nl_langinfo(CODESET), "UTF-8") ? &ascii : &cp437;
 	ui.lists[PANE_ARTISTS] = (struct list){ 0, 0, (int)lib->n_artists };
 	initscr();
