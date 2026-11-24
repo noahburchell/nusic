@@ -199,6 +199,10 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 
+	// ncurses takes LINES and COLUMNS over the size of the terminal and then never follows a resize
+	// bash exports both, they go before the first thread starts
+	unsetenv("LINES");
+	unsetenv("COLUMNS");
 	if(!player_init(notify)) {
 		lib_free(&lib);
 		return 1;
