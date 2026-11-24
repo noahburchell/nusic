@@ -289,13 +289,13 @@ static bool property(DBusMessageIter* it, const char* iface, const char* name) {
 		position = (dbus_int64_t)s.position * 1000;
 		variant(it, DBUS_TYPE_INT64, "x", &position);
 	} else if(!strcmp(name, "Rate")) {
-		value = m.s.speed / 100.0;
+		value = (double)m.s.speed / SPEED_UNITY;
 		variant(it, DBUS_TYPE_DOUBLE, "d", &value);
 	} else if(!strcmp(name, "MinimumRate")) {
-		value = SPEED_MIN / 100.0;
+		value = (double)SPEED_MIN / SPEED_UNITY;
 		variant(it, DBUS_TYPE_DOUBLE, "d", &value);
 	} else if(!strcmp(name, "MaximumRate")) {
-		value = SPEED_MAX / 100.0;
+		value = (double)SPEED_MAX / SPEED_UNITY;
 		variant(it, DBUS_TYPE_DOUBLE, "d", &value);
 	} else if(!strcmp(name, "Volume")) {
 		variant(it, DBUS_TYPE_DOUBLE, "d", &value);
@@ -654,7 +654,7 @@ void mpris_update(const struct play_status* s) {
 	const char* names[4];
 	uint32_t entry = s->track ? s->queue[s->index].id : 0;
 	int64_t now = now_ms();
-	int64_t expected = m.s.position + (m.s.state == PLAY_PLAYING ? (now - m.at) * m.s.speed / 100 : 0);
+	int64_t expected = m.s.position + (m.s.state == PLAY_PLAYING ? (now - m.at) * m.s.speed / SPEED_UNITY : 0);
 	bool same = entry == m.entry && s->track == m.s.track;
 	bool seeked = same && s->track && (s->position > expected + SEEK_GAP || s->position + SEEK_GAP < expected);
 	size_t n = 0;

@@ -2,10 +2,12 @@
 #include "text.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define MIDDLE_W 28
 #define KNOB_W   14
+#define VALUE_W  7
 
 static attr_t title_attr(enum pane p) {
 	if(p == ui.focus) {
@@ -183,12 +185,40 @@ int knob_at(int v, int min, int max) {
 	return (v - min) * (ui.knob_w - 1) / (max - min);
 }
 
-// label 5 columns, slider, gap 1, value 6, without the slider only the value shows
+int speed_knob(void) {
+	if(ui.semitones) {
+		return knob_at(speed_pitch(ui.s.speed), PITCH_MIN, PITCH_MAX);
+	}
+
+	return knob_at(ui.s.speed, SPEED_MIN, SPEED_MAX);
+}
+
+// a pitch between two semitones shows its tenth, past 10 st without the space so that it fits VALUE_W
+static void speed_text(char* buf, size_t size, int speed) {
+	int v;
+	int tenths;
+
+	if(!ui.semitones) {
+		v = speed_ratio(speed);
+		snprintf(buf, size, "%d.%02dx", v / 100, v % 100);
+		return;
+	}
+
+	v = speed_pitch(speed);
+	tenths = abs(v);
+	if(!(v % 10)) {
+		snprintf(buf, size, v ? "%+d st" : "%d st", v / 10);
+	} else {
+		snprintf(buf, size, tenths < 100 ? "%c%d.%d st" : "%c%d.%dst", v < 0 ? '-' : '+', tenths / 10, tenths % 10);
+	}
+}
+
+// label 5 columns, slider, gap 1, value VALUE_W, without the slider only the value shows
 static void draw_control(int y, const char* label, const char* value, int at, bool changed) {
 	int i;
 
 	attrset(changed ? ACCENT | A_BOLD : A_NORMAL);
-	mvprintw(y, ui.w - 8, "%6s", value);
+	mvprintw(y, ui.value_x, "%*s", VALUE_W, value);
 	if(!ui.knob_w) {
 		attrset(A_NORMAL);
 		return;
@@ -217,22 +247,23 @@ static int draw_controls(int y, int cw, int left) {
 	bool even = room >= left;
 	int inside = even ? left - 1 : room - 2;
 
-	ui.knob_w = clamp(inside - 12, 0, KNOB_W);
+	ui.knob_w = clamp(inside - 6 - VALUE_W, 0, KNOB_W);
 	if(ui.knob_w < 6) {
 		ui.knob_w = 0;
 	}
 
-	if(inside < 6) {
+	if(inside < VALUE_W) {
 		ui.ctl_x = 0;
 		return 0;
 	}
 
-	ui.knob_x = ui.w - 9 - ui.knob_w;
-	ui.ctl_x = ui.knob_w ? ui.knob_x - 5 : ui.w - 8;
+	ui.value_x = ui.w - 2 - VALUE_W;
+	ui.knob_x = ui.value_x - 1 - ui.knob_w;
+	ui.ctl_x = ui.knob_w ? ui.knob_x - 5 : ui.value_x;
 	snprintf(gain, sizeof(gain), s->gain ? "%+d dB" : "%d dB", s->gain);
-	snprintf(speed, sizeof(speed), "%d.%02dx", s->speed / 100, s->speed % 100);
+	speed_text(speed, sizeof(speed), s->speed);
 	draw_control(y, "gain", gain, knob_at(s->gain, GAIN_MIN, GAIN_MAX), s->gain != 0);
-	draw_control(y + 1, "rate", speed, knob_at(s->speed, SPEED_MIN, SPEED_MAX), s->speed != SPEED_UNITY);
+	draw_control(y + 1, "rate", speed, speed_knob(), s->speed != SPEED_UNITY);
 
 	return even ? left : ui.w - 2 - ui.ctl_x + 2;
 }

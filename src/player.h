@@ -2,12 +2,15 @@
 
 #include "library.h"
 
-// the gain is in dB, the speed in percent of the speed of the recording
+// the gain is in dB, the speed in millionths of the speed of the recording
+// the pitch of a speed is in tenths of a semitone from the pitch of the recording
 #define GAIN_MIN    (-40)
 #define GAIN_MAX    24
-#define SPEED_MIN   50
-#define SPEED_MAX   200
-#define SPEED_UNITY 100
+#define SPEED_MIN   500000
+#define SPEED_MAX   2000000
+#define SPEED_UNITY 1000000
+#define PITCH_MIN   (-120)
+#define PITCH_MAX   120
 
 enum play_state {
 	PLAY_STOPPED,
@@ -73,6 +76,11 @@ void player_gain_by(int db);
 void player_gain_to(int db);
 // the speed moves the pitch with it, what plays goes on from where it is after a short break
 // position and duration stay in the time of the recording
-void player_speed_by(int percent);
-void player_speed_to(int percent);
+void player_speed_to(int speed);
+// a step ends on the next multiple of 0.05x, with semitones on the next whole semitone
+// it starts from the speed as speed_ratio or speed_pitch gives it
+void player_speed_step(int dir, bool semitones);
+// the speed in hundredths of the speed of the recording, and its pitch
+int speed_ratio(int speed);
+int speed_pitch(int speed);
 void player_status(struct play_status* s);

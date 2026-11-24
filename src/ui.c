@@ -290,7 +290,7 @@ static void nudge(enum control c, int dir) {
 	if(c == CTL_GAIN) {
 		player_gain_by(dir);
 	} else if(c == CTL_SPEED) {
-		player_speed_by(dir * SPEED_STEP);
+		player_speed_step(dir, ui.semitones);
 	}
 }
 
@@ -316,9 +316,15 @@ static enum control control_at(int x, int y) {
 }
 
 // a slider has fewer columns than values, so a click moves one step towards the pointer and no further
+// the value of the rate is the switch between its two units
 static void click_control(enum control c, int x) {
 	int col = x - ui.knob_x;
-	int at = c == CTL_GAIN ? knob_at(ui.s.gain, GAIN_MIN, GAIN_MAX) : knob_at(ui.s.speed, SPEED_MIN, SPEED_MAX);
+	int at = c == CTL_GAIN ? knob_at(ui.s.gain, GAIN_MIN, GAIN_MAX) : speed_knob();
+
+	if(c == CTL_SPEED && x >= ui.value_x) {
+		ui.semitones = !ui.semitones;
+		return;
+	}
 
 	if(!ui.knob_w || col < 0 || col >= ui.knob_w || col == at) {
 		return;
@@ -595,6 +601,9 @@ static void key(int ch) {
 		case '1':
 			reset(CTL_SPEED);
 			break;
+		case '\\':
+			ui.semitones = !ui.semitones;
+			break;
 		case 27:
 			meta_key(getch());
 			break;
@@ -631,7 +640,7 @@ static int timeout_ms(const struct play_status* s) {
 	ms = 1000 - s->position % 1000;
 	left = s->track->duration > s->position ? s->track->duration - s->position : 1000;
 
-	return (int)((left < ms ? left : ms) * 100 / (uint32_t)s->speed) + 20;
+	return (int)((uint64_t)(left < ms ? left : ms) * SPEED_UNITY / (uint32_t)s->speed) + 20;
 }
 
 static void take_message(void) {

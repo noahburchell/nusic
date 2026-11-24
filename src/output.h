@@ -8,7 +8,7 @@
 // wake runs on a pipewire thread when the stream has drained or the output failed
 bool out_init(void (*wake)(void));
 void out_fini(void);
-// speed is in percent, the frames of fmt play at that share of their rate and the pitch moves with it
+// speed is in millionths, the frames of fmt play at that share of their rate and the pitch moves with it
 bool out_open(const struct spa_audio_info_raw* fmt, uint32_t stride, uint32_t speed);
 // closes at once, what is queued is not played
 void out_close(void);

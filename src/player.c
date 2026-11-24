@@ -15,6 +15,8 @@
 #define MARKS      32
 #define STOP       UINT32_MAX
 #define RESTART_MS 3000
+// 0.05x in the hundredths of speed_ratio
+#define RATIO_STEP 5
 
 // DECODING fills the stream, SWITCHING waits for it to play out before a track of
 // another format, ENDING waits for it to play out after the last track
@@ -841,31 +843,55 @@ void player_gain_to(int db) {
 
 // lock is held, the stream has its speed from the time it opens
 // so what plays starts over from where it is in a stream of the new speed
-static void speed_locked(int percent) {
+static void speed_locked(int speed) {
 	struct play_status s;
 
-	percent = limit(percent, SPEED_MIN, SPEED_MAX);
-	if(percent == p.speed) {
+	speed = limit(speed, SPEED_MIN, SPEED_MAX);
+	if(speed == p.speed) {
 		return;
 	}
 
-	p.speed = percent;
+	p.speed = speed;
 	status_locked(&s);
 	if(s.track) {
 		seek_locked(&s, s.position);
 	}
 }
 
-void player_speed_by(int percent) {
+int speed_ratio(int speed) {
+	return (speed + SPEED_UNITY / 200) / (SPEED_UNITY / 100);
+}
+
+int speed_pitch(int speed) {
+	return (int)lround(120.0 * log2((double)speed / SPEED_UNITY));
+}
+
+// the first step past the speed in the direction of dir
+static int speed_step(int speed, int dir, bool semitones) {
+	int v;
+
+	if(semitones) {
+		v = speed_pitch(speed) - PITCH_MIN;
+		v = dir > 0 ? v / 10 + 1 : (v + 9) / 10 - 1;
+		return (int)lround(exp2((double)(v * 10 + PITCH_MIN) / 120.0) * SPEED_UNITY);
+	}
+
+	v = speed_ratio(speed);
+	v = dir > 0 ? v / RATIO_STEP + 1 : (v + RATIO_STEP - 1) / RATIO_STEP - 1;
+
+	return v * RATIO_STEP * (SPEED_UNITY / 100);
+}
+
+void player_speed_step(int dir, bool semitones) {
 	pthread_mutex_lock(&p.lock);
-	speed_locked(p.speed + percent);
+	speed_locked(speed_step(p.speed, dir, semitones));
 	pthread_mutex_unlock(&p.lock);
 	notify();
 }
 
-void player_speed_to(int percent) {
+void player_speed_to(int speed) {
 	pthread_mutex_lock(&p.lock);
-	speed_locked(percent);
+	speed_locked(speed);
 	pthread_mutex_unlock(&p.lock);
 	notify();
 }

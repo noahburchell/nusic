@@ -9,8 +9,6 @@
 
 #define ACCENT COLOR_PAIR(1)
 
-#define SPEED_STEP 5
-
 enum {
 	ROW_ALBUM,
 	ROW_TRACK,
@@ -85,11 +83,13 @@ struct screen {
 	int                   ctl_x;
 	int                   knob_x;
 	int                   knob_w;
+	int                   value_x;
 	uint32_t              bar_ms;
 	enum pane             focus;
 	enum pane             tab;
 	enum pane             click_pane;
 	bool                  split;
+	bool                  semitones;
 	bool                  quit;
 };
 
@@ -100,6 +100,8 @@ bool too_small(void);
 bool shown(enum pane p);
 // the column of a slider that stands for v on the scale from min to max
 int knob_at(int v, int min, int max);
+// that of the speed, the scale is the unit that shows, 1.00x is a third along it and 0 st in its middle
+int speed_knob(void);
 // draws everything, draw_bar only the play bar
 void draw(void);
 void draw_bar(void);

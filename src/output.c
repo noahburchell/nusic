@@ -290,7 +290,7 @@ static bool open_stream(const struct spa_audio_info_raw* fmt, uint32_t stride, u
 	uint64_t bytes;
 	int r;
 
-	wire.rate = (uint32_t)(((uint64_t)fmt->rate * speed + 50) / 100);
+	wire.rate = (uint32_t)(((uint64_t)fmt->rate * speed + 500000) / 1000000);
 	bytes = (uint64_t)wire.rate * stride * RING_SECONDS;
 	if(atomic_load(&out.failed) || !scale || !wire.rate || !ring_map(&out.ring, bytes < RING_MAX ? (uint32_t)bytes : RING_MAX)) {
 		return false;
