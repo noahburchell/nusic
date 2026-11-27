@@ -16,7 +16,8 @@
 static const char defaults[] = "soft-clip=false\n"
                                "soft-clip-knee=0.8\n"
                                "rate-default-unit=st\n"
-                               "always-tabbed=false\n";
+                               "always-tabbed=false\n"
+                               "sort-ignore-articles=false\n";
 
 struct conf conf;
 
@@ -112,6 +113,9 @@ static bool set(const char* path, unsigned line, const char* key, const char* v)
 		expected = "x or st";
 	} else if(!strcmp(key, "always-tabbed")) {
 		ok = flag(v, &conf.always_tabbed);
+		expected = "true or false";
+	} else if(!strcmp(key, "sort-ignore-articles")) {
+		ok = flag(v, &conf.sort_ignore_articles);
 		expected = "true or false";
 	} else {
 		report("%s:%u: unknown key '%s'", path, line, key);

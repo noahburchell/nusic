@@ -24,6 +24,8 @@ struct raw {
 	uint16_t    album_year;
 	uint16_t    number;
 	uint16_t    disc;
+	uint8_t     artist_skip;
+	uint8_t     album_skip;
 	bool        ok;
 };
 

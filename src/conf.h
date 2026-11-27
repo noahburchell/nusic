@@ -6,6 +6,7 @@ struct conf {
 	bool   soft_clip;
 	bool   semitones;
 	bool   always_tabbed;
+	bool   sort_ignore_articles;
 };
 
 extern struct conf conf;

@@ -1,5 +1,6 @@
 #include "library.h"
 
+#include "conf.h"
 #include "db.h"
 #include "report.h"
 #include "scan.h"
@@ -368,8 +369,32 @@ static void* scan_thread(void* arg) {
 	}
 }
 
+// the bytes of a leading a, an or the and of the spaces after it, 0 when no name follows
+static uint8_t article(const char* s) {
+	size_t n;
+
+	if((s[0] | 0x20) == 'a') {
+		n = (s[1] | 0x20) == 'n' ? 2 : 1;
+	} else if((s[0] | 0x20) == 't' && (s[1] | 0x20) == 'h' && (s[2] | 0x20) == 'e') {
+		n = 3;
+	} else {
+		return 0;
+	}
+
+	if(s[n] != ' ') {
+		return 0;
+	}
+
+	do {
+		n++;
+	} while(s[n] == ' ');
+
+	return s[n] && n <= UINT8_MAX ? (uint8_t)n : 0;
+}
+
 // a file without a title is known by its name, an album without an album artist is its artist's
 static void fill(struct raw* r, uint32_t n, struct arena* a) {
+	bool articles = conf.sort_ignore_articles;
 	uint32_t i;
 
 	for(i = 0; i < n; i++) {
@@ -395,13 +420,23 @@ static void fill(struct raw* r, uint32_t n, struct arena* a) {
 		if(!t->album_artist) {
 			t->album_artist = t->artist;
 		}
+
+		if(articles) {
+			t->artist_skip = article(t->album_artist);
+			t->album_skip = article(t->album);
+		}
 	}
 }
 
 static int cmp_raw(const void* pa, const void* pb) {
 	const struct raw* a = pa;
 	const struct raw* b = pb;
-	int c = strcasecmp(a->album_artist, b->album_artist);
+	int c = strcasecmp(a->album_artist + a->artist_skip, b->album_artist + b->artist_skip);
+
+	// group splits on the whole name, names that differ only in the article must not interleave
+	if(!c && (a->artist_skip | b->artist_skip)) {
+		c = strcasecmp(a->album_artist, b->album_artist);
+	}
 
 	if(c) {
 		return c;
@@ -411,7 +446,11 @@ static int cmp_raw(const void* pa, const void* pb) {
 		return a->album_year < b->album_year ? -1 : 1;
 	}
 
-	c = strcasecmp(a->album, b->album);
+	c = strcasecmp(a->album + a->album_skip, b->album + b->album_skip);
+	if(!c && (a->album_skip | b->album_skip)) {
+		c = strcasecmp(a->album, b->album);
+	}
+
 	if(c) {
 		return c;
 	}

@@ -64,10 +64,11 @@ this time, the n was not just my initial but also ncurses
 
 =KEY=VALUE=, # is a comment
 
-| soft-clip         | false | true or false, above 0 dB bend the loudest parts into full scale, not a hard clip    |
-| soft-clip-knee    | 0.8   | 0 to 1, the share of full scale where the soft clip starts to bend, 1 is a hard clip |
-| rate-default-unit | st    | x or st, the steps of the rate at startup, 0.05x or 1 semitone                       |
-| always-tabbed     | false | true or false, show the albums and the queue one at a time at every width            |
+| soft-clip            | false | true or false, above 0 dB bend the loudest parts into full scale, not a hard clip    |
+| soft-clip-knee       | 0.8   | 0 to 1, the share of full scale where the soft clip starts to bend, 1 is a hard clip |
+| rate-default-unit    | st    | x or st, the steps of the rate at startup, 0.05x or 1 semitone                       |
+| always-tabbed        | false | true or false, show the albums and the queue one at a time at every width            |
+| sort-ignore-articles | false | true or false, sort the album artists and the albums past a leading a, an or the     |
 
 ** contact
 [[mailto:nusic@nburch.org][nusic@nburch.org]]
