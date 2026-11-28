@@ -48,6 +48,8 @@ AS_IF([test -z "$nusic_std"],
 
 NUSIC_OPT_CFLAGS=
 NUSIC_OPT_LDFLAGS=
+NUSIC_HARDEN_CFLAGS=
+NUSIC_HARDEN_LDFLAGS=
 NUSIC_CFLAGS="$nusic_std"
 NUSIC_CPPFLAGS=
 NUSIC_LDFLAGS=
@@ -139,11 +141,6 @@ AC_ARG_ENABLE([debug],
   [AS_HELP_STRING([--enable-debug], [build unoptimised with ASan and UBSan])],
   [], [enable_debug=no])
 
-AC_ARG_ENABLE([hardened],
-  [AS_HELP_STRING([--enable-hardened],
-    [_FORTIFY_SOURCE=3, control-flow protection and further hardening])],
-  [], [enable_hardened=no])
-
 nusic_have_lto=no
 AS_IF([test "x$enable_debug" = xyes], [
   NUSIC_TRY_CFLAGS([-O0 -g3], [NUSIC_OPT_CFLAGS])
@@ -188,26 +185,27 @@ AS_IF([test "x$enable_debug" = xyes], [
   NUSIC_OPT_CFLAGS="$NUSIC_OPT_CFLAGS$nusic_lto"
 ])
 
-AS_IF([test "x$enable_debug" != xyes], [
-  AS_IF([test "x$enable_hardened" = xyes], [nusic_fortify=3], [nusic_fortify=2])
-  NUSIC_CPPFLAGS="$NUSIC_CPPFLAGS -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=$nusic_fortify"
-])
-NUSIC_TRY_CFLAGS([-fstack-protector-strong -fstack-clash-protection -fPIE], [NUSIC_CFLAGS])
-AS_CASE([" $LDFLAGS "], [*" -static "*|*" -static-pie "*], [],
-	[NUSIC_TRY_LDFLAG([-pie], [NUSIC_LDFLAGS])])
-NUSIC_TRY_LDFLAG([-Wl,-z,relro], [NUSIC_LDFLAGS])
-NUSIC_TRY_LDFLAG([-Wl,-z,now], [NUSIC_LDFLAGS])
-NUSIC_TRY_LDFLAG([-Wl,-z,noexecstack], [NUSIC_LDFLAGS])
-AS_IF([test "x$enable_hardened" = xyes], [
-  NUSIC_TRY_CFLAGS([
+NUSIC_TRY_CFLAGS([
+	-fstack-protector-strong
+	-fstack-clash-protection
+	-fPIE
 	-fcf-protection=full
 	-mbranch-protection=standard
 	-ftrivial-auto-var-init=zero
 	-fstrict-flex-arrays=3
 	-fno-delete-null-pointer-checks
 	-fno-strict-overflow
-  ], [NUSIC_CFLAGS])
+], [NUSIC_HARDEN_CFLAGS])
+AS_IF([test "x$enable_debug" != xyes], [
+  # a fortify level in the user flags replaces this one
+  AS_CASE([" $CPPFLAGS $CFLAGS "], [*_FORTIFY_SOURCE*], [],
+	  [NUSIC_CPPFLAGS="$NUSIC_CPPFLAGS -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3"])
 ])
+AS_CASE([" $LDFLAGS "], [*" -static "*|*" -static-pie "*], [],
+	[NUSIC_TRY_LDFLAG([-pie], [NUSIC_HARDEN_LDFLAGS])])
+NUSIC_TRY_LDFLAG([-Wl,-z,relro], [NUSIC_HARDEN_LDFLAGS])
+NUSIC_TRY_LDFLAG([-Wl,-z,now], [NUSIC_HARDEN_LDFLAGS])
+NUSIC_TRY_LDFLAG([-Wl,-z,noexecstack], [NUSIC_HARDEN_LDFLAGS])
 
 AC_SEARCH_LIBS([powf], [m], [], [AC_MSG_ERROR([powf is missing from libc and libm])])
 
@@ -225,6 +223,8 @@ nusic_avcodec_version=`$PKG_CONFIG --modversion libavcodec`
 
 AC_SUBST([NUSIC_OPT_CFLAGS])
 AC_SUBST([NUSIC_OPT_LDFLAGS])
+AC_SUBST([NUSIC_HARDEN_CFLAGS])
+AC_SUBST([NUSIC_HARDEN_LDFLAGS])
 AC_SUBST([NUSIC_CFLAGS])
 AC_SUBST([NUSIC_CPPFLAGS])
 AC_SUBST([NUSIC_LDFLAGS])
@@ -243,9 +243,8 @@ AC_MSG_NOTICE([
     ffmpeg .......... libavformat $nusic_avformat_version, libavcodec $nusic_avcodec_version
 
     lto ............. $nusic_have_lto
-    hardened ........ $enable_hardened
     sanitisers ...... $enable_debug
 
-    CFLAGS ..........$NUSIC_OPT_CFLAGS $CFLAGS$NUSIC_CPPFLAGS$NUSIC_CFLAGS
-    LDFLAGS .........$NUSIC_OPT_LDFLAGS $LDFLAGS$NUSIC_LDFLAGS
+    CFLAGS ..........$NUSIC_CPPFLAGS$NUSIC_OPT_CFLAGS$NUSIC_HARDEN_CFLAGS $CFLAGS$NUSIC_CFLAGS
+    LDFLAGS .........$NUSIC_OPT_LDFLAGS$NUSIC_HARDEN_LDFLAGS $LDFLAGS$NUSIC_LDFLAGS
 ])
